@@ -51,7 +51,7 @@ double dx0 = 1.0e-8; // size of perturbation for calculating lyapunov exponent
 double v_scale = 0.000235919122; // scaling for velocity in metric len((x,v)) = sqrt(x^2 + (v_scale*v)^2)
 double init_pert[6] = {dx0, 0, 0, 0, 0, 0}; // initial perturbation
 
-double potential_option; // 0 = normal, 1 = quad, 2 = H.O.
+char* potential_option; // 0 = normal, 1 = quad, 2 = H.O.
 
 // parameters used in main and in subroutines
 // [SI units + Kelvin wherever specified]
@@ -229,16 +229,16 @@ int main(int argc, char *argv[]) {
   else {
     init_name = argv[1];
     potential_option = argv[1];
-    if (potential_option == "oct") {
+    if (strcmp(potential_option, "oct") == 0) {
       printf("Normal Octupole\n");
-    } else if (potential_option == "quad") {
+    } else if (strcmp(potential_option, "quad") == 0) {
       printf("Quadrupole\n");
-    } else if (potential_option == "ho") {
+    } else if (strcmp(potential_option, "ho") == 0) {
       printf("Harmonic Oscillator!\n");
     } else {
-      printf("That is not a good potential_option.\n")
-      printf("Options are: oct, quad, or ho.\n")
-      printf("Better luck next time!\n")
+      printf("That is not a good potential_option.\n");
+      printf("Options are: oct, quad, or ho.\n");
+      printf("Better luck next time!\n");
       return 1;
     }
     seed = atoi(argv[2]);
@@ -712,7 +712,7 @@ double Energy(double xv[]){
 //--------- this computes the magnetic field for the ALPHA trap
 //          includes the mirror coils, the uniform field, and the octupole field
 void Bfield(double r[], double bf[]) {
-  if (potential_option == 2) { // Harmonic Oscillator
+  if (strcmp(potential_option, "ho") == 0) { // Harmonic Oscillator
     bf[0] = 1.54*(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]) / (radtrp2);
     bf[1] = 0;
     bf[2] = 0;
@@ -726,11 +726,9 @@ void Bfield(double r[], double bf[]) {
   	for (int j = 0 ; j < 3 ; j++) {
       bf[j] = bf_temp[j];
     }
-    if (potential_option == 0) {
-      // OCTOPOLE
+    if (strcmp(potential_option, "oct") == 0) { // OCTOPOLE
   	  Boct(r,bf_temp);
-    } else if (potential_option == 1) {
-      // QUADRUPOLE
+    } else if (strcmp(potential_option, "quad") == 0) { // QUADRUPOLE
       Bquad(r, bf_temp);
     }
     for (int j = 0 ; j < 3 ; j++) {
