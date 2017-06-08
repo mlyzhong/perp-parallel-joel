@@ -1,4 +1,3 @@
-//
 // perp-parallel-joel.cpp
 //
 // Simulates Hbar trajectories in the ALPHA trap
@@ -33,7 +32,7 @@
 
 
 // MAIN PARAMETERS: EDIT HERE
-int numtraj = 1; //number of trajectories to simulate
+int numtraj = 10; //number of trajectories to simulate
 double tfin = 100.0; // final time of each trajectory
 double dtim = 3.5e-7; //dtim is the step size of the symplectic stepper.
                       //3.5e-7 is the usual value for the simulations.
@@ -51,7 +50,8 @@ double dx0 = 1.0e-8; // size of perturbation for calculating lyapunov exponent
 double v_scale = 0.000235919122; // scaling for velocity in metric len((x,v)) = sqrt(x^2 + (v_scale*v)^2)
 double init_pert[6] = {dx0, 0, 0, 0, 0, 0}; // initial perturbation
 
-char* potential_option; // 0 = normal, 1 = quad, 2 = H.O.
+char* potential_option; // "oct", "quad", or "ho"
+char* test_type; // "lle", "thresh", or "crossings"
 
 // parameters used in main and in subroutines
 // [SI units + Kelvin wherever specified]
@@ -172,7 +172,7 @@ std::string DateString();
 void WriteMetaParams(std::string name, int numtraj, double tfin, double dtim, int seed);
 
 // writes to output file the crossings information
-void WriteCrossings(std::string name, std::vector<double> cross_t, std::vector<double> cross_Tz, std::vector<double> cross_Lambda);
+void WriteCrossings(std::string name, std::vector<double> cross_t, std::vector<double> cross_Tz);
 
 // computes the average of a file -- returns the average T_z value
 long double average(std::vector<double> cross_Tz);
@@ -186,10 +186,10 @@ long double variance(std::vector<double> cross_Tz, long double average);
 int main(int argc, char *argv[]) {
 
   int inode, nproc;   // MPI variables
+  inode = 1; // overwritten by MPI
   int seed; // random algorithm coefficients!!
   long int i1, i2;
   std::string init_name;
-
 
   int itraj; // iterating over number of trajectories to be taken
 
@@ -222,13 +222,14 @@ int main(int argc, char *argv[]) {
 
   //seed = atoi(getenv("SEED"));             // Get "seed" from the environment.
 
-  if(argc != 3){       // Data file is passed from the command line.
-    printf("Wrong number of options!\nUsage: ./perp-parallel-joel potential_option seed_number\nTry harder next time!\n");
+  if(argc != 4){       // Data file is passed from the command line.
+    printf("Wrong number of options!\nUsage: ./perp-parallel-joel potential_option test_type seed_number\nTry harder next time!\n");
     return 1;
-  }
-  else {
-    init_name = argv[1];
+  } else {
     potential_option = argv[1];
+    test_type = argv[2];
+    seed = atoi(argv[3]);
+
     if (strcmp(potential_option, "oct") == 0) {
       printf("Normal Octupole\n");
     } else if (strcmp(potential_option, "quad") == 0) {
@@ -239,14 +240,27 @@ int main(int argc, char *argv[]) {
       printf("That is not a good potential_option.\n");
       printf("Options are: oct, quad, or ho.\n");
       printf("Better luck next time!\n");
-      return 1;
-    }
-    seed = atoi(argv[2]);
-    if (seed < 1) {
-      printf("Seed must be positive\nTry harder next time!\n");
       return 2;
     }
+
+    if (strcmp(test_type, "lle") == 0) {
+      printf("Largest Lyapunov Exponent\n");
+    } else if (strcmp(test_type, "cross") == 0) {
+      printf("z = 0 Crossings\n");
+    } else if (strcmp(test_type, "thresh") == 0) {
+      printf("Threshold Measurementss!\n");
+    } else {
+      printf("That is not a good test type.\n Options are: lle, cross, or thresh");
+      return 3;
+    }
+
+    if (seed < 1) {
+      printf("Seed must be positive\nTry harder next time!\n");
+      return 4;
+    }
   }
+
+  init_name = DateString() + "_" + potential_option + "_" + test_type;
 
   // MPI UNCOMMENT
   // seed += inode;         // Generate different seeds for the parallel processes.
@@ -260,61 +274,57 @@ int main(int argc, char *argv[]) {
 
   // Setup the information for the electrodes and the magnetic fields.
   InitialSetup();
-  // geometries of trap! -- upper limit if x^2 + y^2 (?)
-
 
 
   // ------------------- START THE SIMULATION!! ------------------------
-
-  time(&todstr2);
-  itraj = 0;
 
   if (inode == 1) {
     WriteMetaParams(init_name, numtraj, tfin, dtim, seed);
   }
 
-  // writes params file
+  // initializes params file, in which each trajectories' parameters are written
   std::ofstream params;
   params.open(("params_" + init_name + ".csv").c_str(), std::ios_base::app);
-  // params << "seed,itraj,name,energy,total_time,cross_n,corr_int\n";
   params.close();
 
 
   // START TRAJECTORY
-  while(itraj < numtraj) {
-    //printf("\nn = %d ", itraj);
+  time(&todstr2);
+  itraj = 0;
+
+  while(itraj < numtraj) {  //printf("\nn = %d ", itraj);
     int cnt = 0;
     int lyapunov_n = 0;
 
-    //initialize the time, starting energy and potentials at the electrodes.
-    tim = -1.0 + 0.1*(2.0*SimRan1(i1,i2) - 1.0);    // -1.0 was used for previous simulations.
+    // initialize the time, starting energy and potentials at the electrodes.
+    tim = -1.0 + 0.1*(2.0*SimRan1(i1,i2) - 1.0);    // start time between -1.1 and -0.9 seconds
     GenInitCond(i1, i2, xv);		// Generate random initial conditions for this iteration of the loop.
+
+    // save the initial conditions for output of trajectories that survive.
     for (int j = 0; j < 6; j++) {
-      xv0[j] = xv[j]; //save the initial conditions for output of trajectories that survive.
+      xv0[j] = xv[j];
     }
-
     energy0 = Energy(xv);
-    //printf("\nE0=%15.8E ", energy0 / kboltz);
+    // printf("\nE0=%15.8E ", energy0 / kboltz);
 
-    // shift the position backward in time by 1/2 of time step for LEAPFROG
-    // taylor expansion, x(t + dt) = x(t) + dt*x'(t) + 0.5*(dt)^2*x''(t)
-
+    // shift the position backward in time by 1/2 of time step for Leapfrog integration
 
     Dydt(tim,xv,dxvdt);
 
+    // taylor expansion, x(t + dt) ~= x(t) + dt*x'(t) + 0.5*(dt)^2*x''(t)
     double dtim_init = -0.5*dtim;
     for (int j = 0; j < 3; j++) {
-        xv[j] += (dxvdt[j]*dtim_init) + 0.5*(dxvdt[j+3]*dtim_init*dtim_init);
+      xv[j] += dxvdt[j]*dtim_init + 0.5*(dtim_init*dtim_init)*dxvdt[j+3];
     }
+    // now, x is at tim - dtim/2, v is at tim
 
+    // initialize Lyapunov exponent algorithm
     for (int j = 0; j < 6; j++) {
       xv_pert[j] = xv[j] + init_pert[j];
       pert[j] = init_pert[j];
     }
 
-
-    // now, x is at tim - dtim/2, v is at tim
-
+    // initialize z = 0 crossings
     double xv_prev[6], xv_prev2[6];
     double last_z, curr_z;
     double T_z; // at z ~= 0, axial potential energy should be nearly zero
@@ -324,21 +334,15 @@ int main(int argc, char *argv[]) {
     double xv_cross[6];
     int cross_n;
 
-
     std::vector<double> cross_t;
-    /* RECORDING CROSSES
     std::vector<double> cross_Tz;
     std::vector<double> cross_x;
     std::vector<double> cross_y;
     std::vector<double> cross_vx;
     std::vector<double> cross_vy;
-    std::vector<double> cross_Lambda;
-    */
 
 
-    double sum = 0;
-    double sum_temp = 0;
-    int cnt_temp = 0;
+    double lyapunov_sum = 0;
 
     cross_n = 0;
     while (ContinueLoop(tim, tfin, xv)) {
@@ -346,118 +350,116 @@ int main(int argc, char *argv[]) {
       Symplec(tim, dtim, xv); // time-evolves xv by one step
       Symplec(tim, dtim, xv_pert); // time-evolves xv_pert by one step
 
-      // computing perturbation size, dx_
-      for (int j = 0; j < 6; j++) {
-        pert[j] = xv_pert[j] - xv[j];
-      }
-
-      dx_ = 0;
-      for (int j = 0; j < 3; j++) {
-        dx_ += pert[j]*pert[j];
-      }
-      for (int j = 3; j < 6; j++) {
-        dx_ += (v_scale*pert[j])*(v_scale*pert[j]);
-      }
-      dx_ = sqrt(dx_);
-
-      printf("(%d, ", lyapunov_n);
-      printf("%15.8E), ", dx_);
-
-      if (lyapunov_n == lyapunov_count) { // lyapunov_n == lyapunov_count:
-        if (cnt > 0) {
-          sum += log(dx_ /dx0);
-          sum_temp += log(dx_ / dx0);
-        }
-        for (int j = 0; j < 6; j++) { // resets perturbation scale
-          xv_pert[j] = xv[j] + pert[j]*(dx0 / dx_);
-        }
-        lyapunov_n = 0;
-      }
-      lyapunov_n++;
-
-      /*
-      if (cnt % 100000 == 0) {
-        printf("(%15.8E, ", tim);
-        printf("%15.8E), ", sum / (cnt * dtim));
-      }*/
-      /*
-      printf("dx=%15.8E\n", (dx_ / dx0));
-      printf("sum = %15.8E\n", sum);
-      */
       //increment time and total number of time steps
       tim += dtim;
       cnt++;
-      cnt_temp++;
 
-      curr_z = xv[2];
-      last_z = xv_prev[2];
+      if (strcmp(test_type, "lle") == 0) {// Lyapunov Algorithm
+        // computing perturbation size, dx_
+        for (int j = 0; j < 6; j++) {
+          pert[j] = xv_pert[j] - xv[j];
+        }
+        dx_ = 0;
+        for (int j = 0; j < 3; j++) {
+          dx_ += pert[j]*pert[j];
+        }
+        for (int j = 3; j < 6; j++) {
+          dx_ += (v_scale*pert[j])*(v_scale*pert[j]);
+        }
+        dx_ = sqrt(dx_);
 
+        // adds to lyapunov_sum the log perturbation growth
+        lyapunov_sum += log(dx_ /dx0);
 
-      if (((last_z < 0) && (curr_z >= 0)) || ((last_z >= 0) && (curr_z < 0))) {
-        /* s is linear extr. between (t - dt/2) and (t + dt/2) for z(t + s*dt) = 0
-          s (between -1/2 and 1/2) that satisfies:
-          0 = (1/2 - s)*(last_z) + (s + 1/2)*curr_z = 0.5(last_z + curr_z) - s(last_z - curr_z)
-          => s = 0.5*(curr_z + last_z) / (last_z - curr_z)
+        // rescales perturbation to be magnitude dx0
+        for (int j = 0; j < 6; j++) {
+          xv_pert[j] = xv[j] + pert[j]*(dx0 / dx_);
+        }
+        /*
+        if (cnt % 100000 == 0) {
+          printf("(%15.8E, ", tim);
+          printf("%15.8E), ", lyapunov_sum / (cnt * dtim));
+        }*/
+        /*
+        printf("dx=%15.8E\n", (dx_ / dx0));
+        printf("lyapunov_sum = %15.8E\n", lyapunov_sum);
         */
 
+      } else if ((strcmp(test_type, "cross") == 0) || (strcmp(test_type, "thresh") == 0)) {
+        curr_z = xv[2];
+        last_z = xv_prev[2];
 
-        s = 0.5*(curr_z + last_z) / (last_z - curr_z);
+        if (((last_z < 0) && (curr_z >= 0)) || ((last_z >= 0) && (curr_z < 0))) {
+          /* s is linear extr. between (t - dt/2) and (t + dt/2) for z(t + s*dt) = 0
+            s (between -1/2 and 1/2) that satisfies:
+            0 = (1/2 - s)*(last_z) + (s + 1/2)*curr_z = 0.5(last_z + curr_z) - s(last_z - curr_z)
+            => s = 0.5*(curr_z + last_z) / (last_z - curr_z)
+          */
+          s = 0.5*(curr_z + last_z) / (last_z - curr_z);
 
-        //printf("s=%15.8E, \n", s);
+          //printf("s=%15.8E, \n", s);
 
-        //printf("z_cross=%15.8E, \n", (0.5 - s) * xv_prev[2] + (s + 0.5)*xv[2]);
+          //printf("z_cross=%15.8E, \n", (0.5 - s) * xv_prev[2] + (s + 0.5)*xv[2]);
 
-        // xv contains x(t + dt/2), v(t + dt)
-        // xv_prev contains x(t - dt/2), v(t)
-        // xv_prev contains x(t - 3*dt/2), v(t - dt)
+          // xv contains x(t + dt/2), v(t + dt)
+          // xv_prev contains x(t - dt/2), v(t)
+          // xv_prev contains x(t - 3*dt/2), v(t - dt)
 
-        // we care only about the vz's:
-        // vz[t - dt] = vz[-1]; vz[t] = vz[0]; vz[t + dt] = vz[1]
-        // quadratic interpolation
-        vz_m1 = xv_prev2[5];
-        vz_0 = xv_prev[5];
-        vz_p1 = xv[5];
+          // we care only about the vz's:
+          // vz[t - dt] = vz[-1]; vz[t] = vz[0]; vz[t + dt] = vz[1]
+          // quadratic interpolation
+          vz_m1 = xv_prev2[5];
+          vz_0 = xv_prev[5];
+          vz_p1 = xv[5];
 
-        // vz(s) = vz_m1*(s)(s-1)/(-1)(-1-1) + vz_0*(s+1)(s-1)/(0+1)(0-1) + vz_p1*(s+1)(s)/(1+1)(1)
-        vz_cross = vz_m1*s*(s-1)/2 + vz_0*(s-1)*(s+1)/(-1) + vz_p1*s*(s+1)/2;
+          // vz(s) = vz_m1*(s)(s-1)/(-1)(-1-1) + vz_0*(s+1)(s-1)/(0+1)(0-1) + vz_p1*(s+1)(s)/(1+1)(1)
+          vz_cross = vz_m1*s*(s-1)/2 + vz_0*(s-1)*(s+1)/(-1) + vz_p1*s*(s+1)/2;
 
-        for (int i = 0; i < 3; i++) {
-          xv_cross[i] = (0.5 - s)*xv_prev[i] + (s + 0.5)*xv[i];
+          for (int i = 0; i < 3; i++) {
+            xv_cross[i] = (0.5 - s)*xv_prev[i] + (s + 0.5)*xv[i];
+          }
+          for (int i = 3; i < 6; i++) {
+            xv_cross[i] = xv_prev2[i]*s*(s-1)/2 + xv_prev[i]*(s-1)*(s+1)/(-1) +
+                          xv[i]*s*(s+1)/2;
+          }
+
+          T_z = 0.5*mprot*(vz_cross*vz_cross);
+
+          if (strcmp(test_type, "cross") == 0) { // only for cross test
+            cross_t.push_back(tim + dtim*s); // more accurate ...
+            cross_Tz.push_back(T_z / kboltz);
+            cross_x.push_back(xv_cross[0]);
+            cross_y.push_back(xv_cross[1]);
+            cross_vx.push_back(xv_cross[3]);
+            cross_vy.push_back(xv_cross[4]);
+          }
+
+          // increases number of crosses
+          cross_n++;
         }
-        for (int i = 3; i < 6; i++) {
-          xv_cross[i] = xv_prev2[i]*s*(s-1)/2 + xv_prev[i]*(s-1)*(s+1)/(-1) +
-                        xv[i]*s*(s+1)/2;
+
+        // updating xprev
+        for (int i = 0; i < 6; i++) {
+          xv_prev2[i] = xv_prev[i];
+          xv_prev[i] = xv[i];
         }
-
-        T_z = 0.5*mprot*(vz_cross*vz_cross);
-
-        cross_t.push_back(tim + dtim*s); // more accurate ...
-        /* RECORDING CROSSES
-        cross_Tz.push_back(T_z / kboltz);
-        cross_x.push_back(xv_cross[0]);
-        cross_y.push_back(xv_cross[1]);
-        cross_vx.push_back(xv_cross[3]);
-        cross_vy.push_back(xv_cross[4]);
-
-
-        cross_Lambda.push_back(sum_temp / (cnt_temp * dtim));
-        */
-        sum_temp = 0;
-        cnt_temp = 0;
-        // increases number of crosses
-        cross_n++;
-      }
-
-      // updating xprev
-      for (int i = 0; i < 6; i++) {
-        xv_prev2[i] = xv_prev[i];
-        xv_prev[i] = xv[i];
       }
     }
+    // jot down parameter file
+    params.open(("params_" + init_name + ".csv").c_str(), std::ios_base::app);
+    params << seed << "," << itraj << "," << init_name << "," << energy0 / kboltz << ","
+    << xv0[0] << "," << xv0[1] << "," << xv0[2] << "," << xv0[3] << "," << xv0[4] << "," << xv0[5] << ","
+    << (tim  - cross_t[0]) << "," << cross_n << "\n";
+    params.close();
+
+
     printf("(%15.8E, ", energy0 / kboltz);
     printf("%15.8E, ", tim);
-    printf("%15.8E),\n", sum / (cnt*dtim));
-    //printf("calculated lyapunov exponent=%15.8E", sum / (dtim * cnt));
+    if (strcmp(test_type, "lle") == 0)
+      printf("%15.8E),\n", lyapunov_sum / (cnt*dtim));
+    else
+      printf("),\n");
+    //printf("calculated lyapunov exponent=%15.8E", lyapunov_sum / (dtim * cnt));
     // shift position forward in time by 1/2.
     // to be honest ... final position doesn't matter ... does it?
     /*Dydt(tim,xv,dxvdt);
@@ -467,11 +469,8 @@ int main(int argc, char *argv[]) {
     } */
 
 
-    if (cross_n > 0) { // as long as there is at least one crossing
-      std::vector<double> corrs;
-      // long double avg = average(cross_Tz);
-      // long double var = variance(cross_Tz, avg);
 
+    if ((strcmp(test_type, "cross") == 0) || (cross_n > 0)) { // as long as there is at least one crossing
       std::string name;
       std::stringstream name_sstream;
       name_sstream << "seed";
@@ -484,13 +483,7 @@ int main(int argc, char *argv[]) {
       //params.open(("params_" + init_name + ".csv").c_str(), std::ios_base::app);
       //params << seed << "," << itraj << "," << name << "," << energy0 / kboltz << "," << (tim  - cross_t[0]) << "," << cross_n << "," << corr_int << "," << avg << "," << var <<"\n";
       //params.close();
-
-      params.open(("params_" + init_name + ".csv").c_str(), std::ios_base::app);
-      params << seed << "," << itraj << "," << name << "," << energy0 / kboltz << "," << (tim  - cross_t[0]) << "," << cross_n << "\n";
-      params.close();
-
-      //WriteCorrs(name, corrs);
-      //WriteCrossings(name, cross_t, cross_Tz, cross_Lambda);
+      WriteCrossings(name, cross_t, cross_Tz);
     }
 
 
@@ -588,7 +581,7 @@ void InitialSetup() {
   end2 = -0.1442752; // between small trap and medium trap
   end3 = -0.1392752; // between medium trap and big radius
   end4 = 0.1392752; // between big trap and small radius
-  end5 = 0.19510; // end of trap
+  end5 = 0.195095; // end of trap
 
 	// --- Magnetic field calculation data, some of it was previously read from hbar_qdif_lin2010.datt
   bunif = 1.0;        // Uniform magnetic field strength (T)
@@ -726,9 +719,9 @@ void Bfield(double r[], double bf[]) {
   	for (int j = 0 ; j < 3 ; j++) {
       bf[j] = bf_temp[j];
     }
-    if (strcmp(potential_option, "oct") == 0) { // OCTOPOLE
+    if (strcmp(potential_option, "oct") == 0) { // Octupole
   	  Boct(r,bf_temp);
-    } else if (strcmp(potential_option, "quad") == 0) { // QUADRUPOLE
+    } else if (strcmp(potential_option, "quad") == 0) { // Quadrupole
       Bquad(r, bf_temp);
     }
     for (int j = 0 ; j < 3 ; j++) {
@@ -947,6 +940,23 @@ void Dydt(double t, double xv[], double dxvdt[]){
 
 // ------- loop continue condition in main()
 bool ContinueLoop(double tim, double tfin, double xv[3]) {
+  // original script
+  /*if(tim < tfin){
+    if ((xv[2] > 0.0) && (xv[2] < 0.04516)){
+      if ((xv[0]*xv[0]+xv[1]*xv[1]) < 0.016800 * 0.016800){ l_cond = 1; }
+    }
+    if ((xv[2] >= 0.04516) && (xv[2] <= 0.32036)){
+      if ((xv[0]*xv[0]+xv[1]*xv[1]) < 0.022275 * 0.022275){ l_cond = 1; }
+    }
+    if ((xv[2] > 0.32036) && (xv[2] < 0.37848)){
+      if ((xv[0]*xv[0]+xv[1]*xv[1]) < 0.016800){ l_cond = 1; }
+    }
+  }
+  zmid = 0.183385;
+
+  radtrp = 0.022275;   // Trap radius (maximum electrode radius)
+  sm_rad = 0.016800;   // Trap radius (small electrode radius) */
+
   if (tim < tfin) {
     if ((xv[2] > end1) && (xv[2] < end5)) { // within ends of trap
       if ((xv[2] < end2) || (xv[2] > end4)) { // small trap
@@ -1016,24 +1026,23 @@ std::string DateString() {
   return (std::string) buff;
 }
 
-// ------- Writes 3 paramter file
+// ------- Writes metaparameters –– the parameters shared across all trajectories
 void WriteMetaParams(std::string name, int numtraj, double tfin, double dtim, int seed) {
   std::ofstream metaparams;
   metaparams.open(("metaparams_" + name + ".csv").c_str(), std::ios_base::app);
-  //metaparams << "seed,numtraj,tfin,dtim\n";
+  metaparams << "seed,numtraj,tfin,dtim\n";
   metaparams << seed << "," << numtraj << "," << tfin << "," << dtim << "\n";
   metaparams.close();
 }
 
 
-void WriteCrossings(std::string name, std::vector<double> cross_t, std::vector<double> cross_Tz, std::vector<double> cross_Lambda) { // std::vector<double> cross_x, std::vector<double> cross_y, std::vector<double> cross_vx, std::vector<double> cross_vy) {
-  // corrs
+void WriteCrossings(std::string name, std::vector<double> cross_t, std::vector<double> cross_Tz) { // std::vector<double> cross_x, std::vector<double> cross_y, std::vector<double> cross_vx, std::vector<double> cross_vy) {
   std::ofstream crossings ((name + "_crossings.csv").c_str());
   crossings.is_open();
-  crossings << "cross_t,cross_dt,cross_Tz,cross_Lambda\n";
+  crossings << "cross_t,cross_dt,cross_Tz\n";
   crossings << cross_t[0] << "," << 0 << ',' << cross_Tz[0] << "," << 0 << "\n";
   for (int i = 1; i < cross_t.size(); i++) {
-    crossings << cross_t[0] << "," << (cross_t[i] - cross_t[i-1]) << "," << cross_Tz[i] << "," << cross_Lambda[i] << "\n";
+    crossings << cross_t[0] << "," << (cross_t[i] - cross_t[i-1]) << "," << cross_Tz[i] << "\n";
   }
   crossings.close();
 }
