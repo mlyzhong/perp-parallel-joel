@@ -10,6 +10,7 @@
 // 7 June, 2017
 
 
+
 //standard header files
 #include <string.h> //string manipulation
 #include <stdio.h>   // file I/O
@@ -32,12 +33,13 @@
 
 
 // MAIN PARAMETERS: EDIT HERE
-int numtraj = 10; //number of trajectories to simulate
+int numtraj = 100; //number of trajectories to simulate
 double tfin = 100.0; // final time of each trajectory
-double dtim = 3.5e-7; //dtim is the step size of the symplectic stepper.
+double dtim = 3.5e-5; //dtim is the step size of the symplectic stepper.
                       //3.5e-7 is the usual value for the simulations.
 
-int lyapunov_count = 1000; // number of time steps to do lyapunov count step
+char* potential_option; // "oct", "quad", or "ho"
+char* test_type; // "lle", "thresh", or "crossings"
 
 // parameters for Largest Lyapunov Exponent
 double dx0 = 1.0e-8; // size of perturbation for calculating lyapunov exponent
@@ -50,8 +52,10 @@ double dx0 = 1.0e-8; // size of perturbation for calculating lyapunov exponent
 double v_scale = 0.000235919122; // scaling for velocity in metric len((x,v)) = sqrt(x^2 + (v_scale*v)^2)
 double init_pert[6] = {dx0, 0, 0, 0, 0, 0}; // initial perturbation
 
-char* potential_option; // "oct", "quad", or "ho"
-char* test_type; // "lle", "thresh", or "crossings"
+
+// parameter for threshold
+double thresh_frac = 0.2;
+double measure_time = 0.0; // start measurement at this time
 
 // parameters used in main and in subroutines
 // [SI units + Kelvin wherever specified]
@@ -222,7 +226,7 @@ int main(int argc, char *argv[]) {
 
   //seed = atoi(getenv("SEED"));             // Get "seed" from the environment.
 
-  if(argc != 4){       // Data file is passed from the command line.
+  if (argc != 4) {       // Data file is passed from the command line.
     printf("Wrong number of options!\nUsage: ./perp-parallel-joel potential_option test_type seed_number\nTry harder next time!\n");
     return 1;
   } else {
@@ -243,12 +247,15 @@ int main(int argc, char *argv[]) {
       return 2;
     }
 
-    if (strcmp(test_type, "lle") == 0) {
+    if (strcmp(test_type, "all") == 0) {
+      printf("To be printed out: all information (including LLE)\n");
+      printf("t,x,y,z,perp_x,perp_y,perp_z,perp_vx,perp_vy,perp_vz,dlog|perp|/dt");
+    } else if (strcmp(test_type, "lle") == 0) {
       printf("Largest Lyapunov Exponent\n");
     } else if (strcmp(test_type, "cross") == 0) {
       printf("z = 0 Crossings\n");
     } else if (strcmp(test_type, "thresh") == 0) {
-      printf("Threshold Measurementss!\n");
+      printf("Threshold Measurements!\n");
     } else {
       printf("That is not a good test type.\n Options are: lle, cross, or thresh");
       return 3;
@@ -324,6 +331,17 @@ int main(int argc, char *argv[]) {
       pert[j] = init_pert[j];
     }
 
+    if (strcmp(test_type, "all") == 0) {
+      printf("\n%15.8E,", tim);
+      for (int j = 0; j < 3; j++) {
+        printf("%15.8E,", xv[j]); // only need to print x, y, z; vx, vy, vz can be determined from data
+      }
+      for (int j = 0; j < 6; j++) {
+        printf("%15.8E,", pert[j]); // only need to print x, y, z; vx, vy, vz can be determined from data
+      }
+      printf("0,"); // start with 0 in d(log pert/dt))
+    }
+
     // initialize z = 0 crossings
     double xv_prev[6], xv_prev2[6];
     double last_z, curr_z;
@@ -344,20 +362,39 @@ int main(int argc, char *argv[]) {
 
     double lyapunov_sum = 0;
 
+
+    // threshold parameters
+    double Tz_init;
+    double t_init;
+    bool started_thresh = false;
+    bool finished_thresh = false;
+
     cross_n = 0;
-    while (ContinueLoop(tim, tfin, xv)) {
+    while ((ContinueLoop(tim, tfin, xv)) && (!(finished_thresh))) { // finished_thresh only set in threshold test
       // should step x(t - dt/2) -> x(t + dt/2); v(t) -> v(t+dt);
       Symplec(tim, dtim, xv); // time-evolves xv by one step
-      Symplec(tim, dtim, xv_pert); // time-evolves xv_pert by one step
 
       //increment time and total number of time steps
       tim += dtim;
       cnt++;
 
-      if (strcmp(test_type, "lle") == 0) {// Lyapunov Algorithm
+      if (strcmp(test_type, "all") == 0) {
+        printf("\n%15.8E,", tim);
+        for (int j = 0; j < 3; j++) {
+          printf("%15.8E,", xv[j]); // only need to print x, y, z; vx, vy, vz can be determined from data
+        }
+      }
+          // printf("E0=%15.8E ", energy0 / kboltz);
+
+
+      if ((strcmp(test_type, "lle") == 0) || (strcmp(test_type, "all") == 0)) {// Lyapunov Algorithm
+        Symplec(tim, dtim, xv_pert); // time-evolves xv_pert by one step
+
         // computing perturbation size, dx_
         for (int j = 0; j < 6; j++) {
           pert[j] = xv_pert[j] - xv[j];
+          if (strcmp(test_type, "all") == 0)
+            printf("%15.8E,", pert[j]); // print out the new perturbation
         }
         dx_ = 0;
         for (int j = 0; j < 3; j++) {
@@ -367,6 +404,9 @@ int main(int argc, char *argv[]) {
           dx_ += (v_scale*pert[j])*(v_scale*pert[j]);
         }
         dx_ = sqrt(dx_);
+
+        if (strcmp(test_type, "all") == 0)
+          printf("%15.8E,", log(dx_ /dx0) / dtim); // print out the log perturbation growth rate
 
         // adds to lyapunov_sum the log perturbation growth
         lyapunov_sum += log(dx_ /dx0);
@@ -434,6 +474,26 @@ int main(int argc, char *argv[]) {
             cross_vy.push_back(xv_cross[4]);
           }
 
+          else if (strcmp(test_type, "thresh") == 0) { // only for threshold test_type
+            if (!(started_thresh) && ((tim + s*dtim) > measure_time)) { // take initial measurement
+              started_thresh = true;
+              t_init = tim + s*dtim;
+              Tz_init = T_z;
+              bool started_thresh = false;
+              bool finished_thresh = false;
+            }
+            else if (started_thresh) {
+              if ((T_z - Tz_init > energy0*thresh_frac) || (T_z - Tz_init < -energy0*thresh_frac)) {
+                finished_thresh = true; // finished sequence
+                printf("\n(t_init,Tz_init,t_fin,Tz_fin)");
+                printf("\n(%8.8E,", t_init);
+                printf("%8.8E,", Tz_init);
+                printf("%8.8E,", (tim + s*dtim));
+                printf("%8.8E)", T_z);
+              }
+            }
+          }
+
           // increases number of crosses
           cross_n++;
         }
@@ -448,17 +508,23 @@ int main(int argc, char *argv[]) {
     // jot down parameter file
     params.open(("params_" + init_name + ".csv").c_str(), std::ios_base::app);
     params << seed << "," << itraj << "," << init_name << "," << energy0 / kboltz << ","
-    << xv0[0] << "," << xv0[1] << "," << xv0[2] << "," << xv0[3] << "," << xv0[4] << "," << xv0[5] << ","
-    << (tim  - cross_t[0]) << "," << cross_n << "\n";
+    << xv0[0] << "," << xv0[1] << "," << xv0[2] << "," << xv0[3] << "," << xv0[4] << "," << xv0[5] << "\n";
     params.close();
 
+    if ((strcmp(test_type, "thresh") == 0) && (!(finished_thresh))) {
+      printf("\n(t_init,Tz_init,t_fin,Tz_fin)");
+      printf("\n(%8.8E,", t_init);
+      printf("%8.8E,", Tz_init);
+      printf("nan,nan)");
+    }
 
-    printf("(%15.8E, ", energy0 / kboltz);
-    printf("%15.8E, ", tim);
-    if (strcmp(test_type, "lle") == 0)
-      printf("%15.8E),\n", lyapunov_sum / (cnt*dtim));
+    printf("\n(%15.8E,", energy0 / kboltz);
+    printf("%15.8E", tim);
+
+    if ((strcmp(test_type, "lle") == 0) || (strcmp(test_type, "all") == 0))
+      printf(",%15.8E),\n", lyapunov_sum / (cnt*dtim));
     else
-      printf("),\n");
+      printf(")");
     //printf("calculated lyapunov exponent=%15.8E", lyapunov_sum / (dtim * cnt));
     // shift position forward in time by 1/2.
     // to be honest ... final position doesn't matter ... does it?
@@ -469,8 +535,7 @@ int main(int argc, char *argv[]) {
     } */
 
 
-
-    if ((strcmp(test_type, "cross") == 0) || (cross_n > 0)) { // as long as there is at least one crossing
+    if ((strcmp(test_type, "cross") == 0) && (cross_n > 0)) { // as long as there is at least one crossing
       std::string name;
       std::stringstream name_sstream;
       name_sstream << "seed";
@@ -487,10 +552,10 @@ int main(int argc, char *argv[]) {
     }
 
 
+
     itraj++;
   }
 
-  params.close();
   time(&todfin);
   printf("Total simtime is (s): %13.6E\n", difftime(todfin,todstr2));
 
