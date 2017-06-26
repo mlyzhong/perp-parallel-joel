@@ -25,21 +25,50 @@
 #include <sstream> // for string manipulations
 
 
+// for eigenvalues
+#include "eigen-eigen-67e894c6cd8f/Eigen/Core"
+#include "eigen-eigen-67e894c6cd8f/Eigen/Eigenvalues"
+using Eigen::MatrixXd;
+using Eigen::EigenSolver;
+
+
+
 //---------------------------------- MPI library/instructions for parallelization
 //standard parallelization header files
 // MPI UNCOMMENT
 // #include <mpi.h>
 //----------------------------------
 
+// parameters ... about using higher magnetic moment
+const int nprst = 25;
+int npr = 1; // the variable of interest!
+bool useNpr = false;
+double gamma_decay;
 
 // MAIN PARAMETERS: EDIT HERE
-int numtraj = 100; //number of trajectories to simulate
-double tfin = 100.0; // final time of each trajectory
-double dtim = 3.5e-5; //dtim is the step size of the symplectic stepper.
+int numtraj = 1; //number of trajectories to simulate
+double tfin = 10.0; // final time of each trajectory
+double dtim = 3.5e-6; //dtim is the step size of the symplectic stepper.
                       //3.5e-7 is the usual value for the simulations.
 
 char* potential_option; // "oct", "quad", or "ho"
 char* test_type; // "lle", "thresh", or "crossings"
+
+
+// parameters for Jacobian LLE calculation
+double perturbations[6] = {1.0e-6, 1.0e-6, 1.0e-6, 0.05, 0.05, 0.05};
+int every_n = 1; // because eigenvalues are so expensive to compute, the computation only runs every every_n times
+double factor = 4238.73971; // for much more symmetry
+double jac_sum = 0;
+double jac_sum2 = 0;
+
+
+
+// parameter for 2-D simulation -- which (xy)-z plane to be used?
+// x' = x*cos(phi) + y*sin(phi)
+// phi ranges from 0 to pi
+double phi = 0;
+double e_x, e_y; // = cos(phi), sin(phi) respectively. see InitialSetup
 
 // parameters for Largest Lyapunov Exponent
 double dx0 = 1.0e-8; // size of perturbation for calculating lyapunov exponent
@@ -51,6 +80,9 @@ double dx0 = 1.0e-8; // size of perturbation for calculating lyapunov exponent
 // v_scale = 0.000235919122
 double v_scale = 0.000235919122; // scaling for velocity in metric len((x,v)) = sqrt(x^2 + (v_scale*v)^2)
 double init_pert[6] = {dx0, 0, 0, 0, 0, 0}; // initial perturbation
+
+// cp 0.022275 meters
+
 
 
 // parameter for threshold
@@ -130,7 +162,7 @@ void Boct(double r[], double bf[]);
 void Bquad(double r[], double bf[]);
 
 // computes the B_oct field without edges
-void Boct_edgeless(double r[], double bf[]);
+void Boct_inf(double r[], double bf[]);
 
 // computes net B-field
 // includes the 2 mirror coils, the uniform field, and the octupole field
@@ -173,7 +205,7 @@ bool ContinueLoop(double tim, double tfin, double xv[3]);
 std::string DateString();
 
 // writes to individual files each trajectory
-void WriteMetaParams(std::string name, int numtraj, double tfin, double dtim, int seed);
+void WriteMetaParams(std::string name, int numtraj, double tfin, double dtim, double perturbations[6], int seed);
 
 // writes to output file the crossings information
 void WriteCrossings(std::string name, std::vector<double> cross_t, std::vector<double> cross_Tz);
@@ -203,6 +235,7 @@ int main(int argc, char *argv[]) {
 
   // perturbation variables for LLE calculation
   double xv_pert[6];
+  double xv_pertp[6]; double xv_pertm[6];
   double pert[6];
   double dx_;
 
@@ -240,6 +273,12 @@ int main(int argc, char *argv[]) {
       printf("Quadrupole\n");
     } else if (strcmp(potential_option, "ho") == 0) {
       printf("Harmonic Oscillator!\n");
+    } else if (strcmp(potential_option, "oct_inf") == 0) {
+      printf("Infinite Octupole (still with Mirror coils)\n");
+    } else if (strcmp(potential_option, "oct_edgeless") == 0) {
+      printf("Edgeless Octupole (withOUT Mirror coils)\n");
+    } else if (strcmp(potential_option, "oct_2d") == 0) {
+      printf("2d Octupole, with angle phi (see first couple of lines in  code)\n");
     } else {
       printf("That is not a good potential_option.\n");
       printf("Options are: oct, quad, or ho.\n");
@@ -249,7 +288,10 @@ int main(int argc, char *argv[]) {
 
     if (strcmp(test_type, "all") == 0) {
       printf("To be printed out: all information (including LLE)\n");
-      printf("t,x,y,z,perp_x,perp_y,perp_z,perp_vx,perp_vy,perp_vz,dlog|perp|/dt");
+      printf("t,E,x,y,z,L_1,L_2,L_3,L_4,L_5,L_6");
+      // printf("t,E,x,y,z,perp_x,perp_y,perp_z,perp_vx,perp_vy,perp_vz,dlog|perp|/dt");
+    } else if (strcmp(test_type, "jacob") == 0) {
+      printf("Jacobian test for lyapunov exponent spectrum!\n");
     } else if (strcmp(test_type, "lle") == 0) {
       printf("Largest Lyapunov Exponent\n");
     } else if (strcmp(test_type, "cross") == 0) {
@@ -286,7 +328,7 @@ int main(int argc, char *argv[]) {
   // ------------------- START THE SIMULATION!! ------------------------
 
   if (inode == 1) {
-    WriteMetaParams(init_name, numtraj, tfin, dtim, seed);
+    WriteMetaParams(init_name, numtraj, tfin, dtim, perturbations, seed);
   }
 
   // initializes params file, in which each trajectories' parameters are written
@@ -306,6 +348,15 @@ int main(int argc, char *argv[]) {
     // initialize the time, starting energy and potentials at the electrodes.
     tim = -1.0 + 0.1*(2.0*SimRan1(i1,i2) - 1.0);    // start time between -1.1 and -0.9 seconds
     GenInitCond(i1, i2, xv);		// Generate random initial conditions for this iteration of the loop.
+
+    if (useNpr) {
+      //nprst is the starting value for n (I usually use ~25)
+      //npr is the initial principle quantum number (set to 1 if want to
+      //   launch the Hbar in its ground state)
+      //gamma_decay is a good approximation to the radiative decay rate
+      npr = nprst;
+      gamma_decay = 1.61E10 * (2./3.) / (float(npr)*npr*npr*(npr-.5)*(npr-.5)) ;
+    }
 
     // save the initial conditions for output of trajectories that survive.
     for (int j = 0; j < 6; j++) {
@@ -372,6 +423,18 @@ int main(int argc, char *argv[]) {
     cross_n = 0;
     while ((ContinueLoop(tim, tfin, xv)) && (!(finished_thresh))) { // finished_thresh only set in threshold test
       // should step x(t - dt/2) -> x(t + dt/2); v(t) -> v(t+dt);
+
+      if((SimRan1(i1,i2) < (dtim*gamma_decay)) && (npr > 1)) {
+        //nprst is the starting value for n (I usually use ~25)
+        //npr is the initial principle quantum number (set to 1 if want to
+        //   launch the Hbar in its ground state)
+        //gamma_decay is a good approximation to the radiative decay rate
+        npr--;
+        gamma_decay = 1.61E10*(2./3.)/(float(npr)*npr*npr*(npr-.5)*(npr-.5));
+      }
+
+
+
       Symplec(tim, dtim, xv); // time-evolves xv by one step
 
       //increment time and total number of time steps
@@ -380,6 +443,7 @@ int main(int argc, char *argv[]) {
 
       if (strcmp(test_type, "all") == 0) {
         printf("\n%15.8E,", tim);
+        //printf("%15.8E ", Energy(xv) / kboltz);
         for (int j = 0; j < 3; j++) {
           printf("%15.8E,", xv[j]); // only need to print x, y, z; vx, vy, vz can be determined from data
         }
@@ -387,7 +451,7 @@ int main(int argc, char *argv[]) {
           // printf("E0=%15.8E ", energy0 / kboltz);
 
 
-      if ((strcmp(test_type, "lle") == 0) || (strcmp(test_type, "all") == 0)) {// Lyapunov Algorithm
+      if ((strcmp(test_type, "lle") == 0)) {// Lyapunov Algorithm
         Symplec(tim, dtim, xv_pert); // time-evolves xv_pert by one step
 
         // computing perturbation size, dx_
@@ -415,6 +479,11 @@ int main(int argc, char *argv[]) {
         for (int j = 0; j < 6; j++) {
           xv_pert[j] = xv[j] + pert[j]*(dx0 / dx_);
         }
+
+
+
+
+
         /*
         if (cnt % 100000 == 0) {
           printf("(%15.8E, ", tim);
@@ -425,6 +494,217 @@ int main(int argc, char *argv[]) {
         printf("lyapunov_sum = %15.8E\n", lyapunov_sum);
         */
 
+      } else if ((strcmp(test_type, "jacob") == 0) || (strcmp(test_type, "all") == 0)) {
+        if ((cnt + 1) % every_n == 0) {
+
+          MatrixXd Jac(6,6);
+          //MatrixXd Jac_(6,6);
+
+          // matrix test for 2d case
+          /*
+          MatrixXd Jac2D(2, 2);
+
+
+
+          for (int j = 0; j < 2; j++) {
+            j *= 3;
+            for (int k = 0; k < 6; k++) {
+              xv_pert[k] = xv_prev[k];
+            }
+
+            xv_pert[j] += perturbations[j];
+
+            Symplec(tim, dtim, xv_pert);
+
+
+            // std::cout << std::endl <<  Jac << std::endl << std::endl << std::endl;
+            for (int k = 0; k < 2; k++) {
+              k *= 3;
+              Jac2D(k / 3, j / 3) = (xv_pert[k] - xv[k]) / (perturbations[j]);
+            }
+          }
+
+          //std::cout << std::endl << "FACTOR_TRANSPOSE"<< std::endl;
+
+          std::cout << std::endl << Jac2D << std::endl;
+            EigenSolver< MatrixXd > es(Jac2D);
+          std::cout << std::endl << es.eigenvalues() << std::endl;
+
+
+
+          //std::cout << std::endl << es.eigenvalues() << std::endl;
+
+          for (int j = 0; j < 2; j++) {
+              std::cout << es.eigenvalues()[j] - ((std::complex<double>) 1.0) << ", ";
+          }
+          for (int j = 0; j < 2; j++) {
+              std::cout << std::abs(es.eigenvalues()[j]) - 1 << ", ";
+          }
+          for (int j = 0; j < 2; j++) {
+              std::cout << log(std::abs(es.eigenvalues()[j])) << ", ";
+          }
+          for (int j = 0; j < 2; j++) {
+              std::cout << log(std::abs(es.eigenvalues()[j])) / (dtim) << ", ";
+          }
+
+          if (cnt != 1) {
+            jac_sum += log(std::abs(es.eigenvalues()[0])) / (dtim);
+            jac_sum2 += (log(std::abs(es.eigenvalues()[0])) / (dtim)) * (log(std::abs(es.eigenvalues()[0])) / (dtim));
+            std::cout << jac_sum / cnt << ", " << sqrt(jac_sum2 / cnt - (jac_sum / cnt)*(jac_sum / cnt)) << ", ";
+          }
+
+          */
+
+          for (int j = 0; j < 6; j++) {
+            for (int k = 0; k < 6; k++) {
+              xv_pertp[k] = xv_prev[k]; xv_pertm[k] = xv_prev[k];
+            }
+
+            xv_pertp[j] += perturbations[j] / 2;
+            xv_pertm[j] -= perturbations[j] / 2;
+
+            volatile double perturbation_temp = xv_pertp[j] - xv_pertm[j];
+
+            Symplec(tim, dtim, xv_pertp);
+            Symplec(tim, dtim, xv_pertm);
+
+            // std::cout << std::endl <<  Jac << std::endl << std::endl << std::endl;
+            for (int k = 0; k < 6; k++) {
+              Jac(k, j) = (xv_pertp[k] - xv_pertm[k]) / perturbation_temp;
+            }
+          }
+
+
+          /* rescaling  off-diagonal blocks  doesn't seem to change anything
+          for (int j = 0; j < 6; j++) {
+            for (int k = 0; k < 6; k++) {
+              Jac_(k, j) = Jac(k, j);
+              if ((j >= 3) && (k < 3)) {
+                Jac_(k, j) *= factor;
+              } else if ((k >= 3) && (j < 3)) {
+                Jac_(k, j) /= factor;
+              }
+            }
+          }
+          */
+
+
+
+
+          // std::cout << std::endl << "NORMAL"<< std::endl;
+
+
+          //std::cout << std::endl << Jac << std::endl;
+          EigenSolver<MatrixXd> es(Jac);
+          //std::cout << std::endl << es.eigenvalues() << std::endl;
+
+          double lambdas[6];
+
+
+          for (int j = 0; j < 6; j++) {
+            lambdas[j] = log(std::abs(es.eigenvalues()[j])) / (dtim);
+          }
+
+          std::sort(std::begin(lambdas), std::end(lambdas));
+
+
+          // printf("\n");
+
+          for (int j = 0; j < 6; j++) {
+            printf("%15.8E,", lambdas[5 - j]);
+          }
+
+
+          // printf("\n");
+
+          /*
+          MatrixXd JacTJac(6,6);
+          JacTJac = Jac * Jac.transpose();
+          EigenSolver<MatrixXd> esT(JacTJac);
+
+          double lambdasT[6];
+
+
+          for (int j = 0; j < 6; j++) {
+            lambdasT[j] = log(std::abs(esT.eigenvalues()[j])) / (2*dtim);
+          }
+
+          std::sort(std::begin(lambdasT), std::end(lambdasT));
+
+          for (int j = 0; j < 6; j++) {
+            printf("%15.8E,", lambdasT[5 - j]);
+          }
+
+          printf("\n");
+
+
+          // MatrixXd JacTJac(6,6);
+          JacTJac = Jac.transpose() * Jac;
+          EigenSolver<MatrixXd> esT1(JacTJac);
+
+
+
+          for (int j = 0; j < 6; j++) {
+            lambdasT[j] = log(std::abs(esT1.eigenvalues()[j])) / (2*dtim);
+          }
+
+          std::sort(std::begin(lambdasT), std::end(lambdasT));
+
+          for (int j = 0; j < 6; j++) {
+            printf("%15.8E,", lambdasT[5 - j]);
+          }
+
+          /*
+          std::cout << std::endl << "NORMAL_TRANSPOSE"<< std::endl;
+
+          Jac = Jac.transpose()*Jac;
+          std::cout << std::endl << Jac << std::endl;
+          EigenSolver<MatrixXd> es2(Jac);
+          std::cout << std::endl << es2.eigenvalues() << std::endl;
+
+          for (int j = 0; j < 6; j++) {
+              std::cout << log(std::abs(es2.eigenvalues()[j])) / (dtim) << ", ";
+          }*/
+
+          /*
+
+
+
+          std::cout << std::endl << "FACTOR"<< std::endl;
+
+          std::cout << std::endl << Jac_ << std::endl;
+          // Jac_ = Jac_.transpose()*Jac_;
+          EigenSolver<MatrixXd> es1(Jac_);
+          std::cout << std::endl << es1.eigenvalues() << std::endl;
+
+
+          for (int j = 0; j < 6; j++) {
+              std::cout << log(std::abs(es1.eigenvalues()[j])) / (dtim) << ", ";
+          }
+
+          std::cout << std::endl << "FACTOR_TRANSPOSE"<< std::endl;
+
+          Jac_ = Jac_.transpose()*Jac_;
+          std::cout << std::endl << Jac_ << std::endl;
+          EigenSolver<MatrixXd> es3(Jac_);
+          std::cout << std::endl << es3.eigenvalues() << std::endl;
+
+          for (int j = 0; j < 6; j++) {
+              std::cout << log(std::abs(es3.eigenvalues()[j])) / (dtim) << ", ";
+          }
+
+
+
+          /*
+          std::cout << std::abs(es.eigenvalues()[0] + es.eigenvalues()[1] + es.eigenvalues()[2] *es.eigenvalues()[3] + es.eigenvalues()[4] + es.eigenvalues()[5]) / dtim << std::endl;
+
+          std::cout << (es.eigenvalues()[0]).real() / dtim << "," << (es.eigenvalues()[1]).real() / dtim << "," << ((es.eigenvalues()[2]).real() / dtim) << "," << (es.eigenvalues()[3]).real() / dtim << "," << ((es.eigenvalues()[4]).real() / dtim) << ","  << (es.eigenvalues()[5]).real() / dtim ;
+
+
+          // << std::endl << std::endl << std::abs(es.eigenvalues()[0]) << "," <<  std::abs(es.eigenvalues()[0]) <<  "," << std::abs(es.eigenvalues()[4]);
+          // std::complex<double> lambda = es.eigenvalues()[0];
+          */
+        }
       } else if ((strcmp(test_type, "cross") == 0) || (strcmp(test_type, "thresh") == 0)) {
         curr_z = xv[2];
         last_z = xv_prev[2];
@@ -499,10 +779,10 @@ int main(int argc, char *argv[]) {
         }
 
         // updating xprev
-        for (int i = 0; i < 6; i++) {
-          xv_prev2[i] = xv_prev[i];
-          xv_prev[i] = xv[i];
-        }
+      }
+      for (int i = 0; i < 6; i++) {
+        xv_prev2[i] = xv_prev[i];
+        xv_prev[i] = xv[i];
       }
     }
     // jot down parameter file
@@ -522,9 +802,9 @@ int main(int argc, char *argv[]) {
     printf("%15.8E", tim);
 
     if ((strcmp(test_type, "lle") == 0) || (strcmp(test_type, "all") == 0))
-      printf(",%15.8E),\n", lyapunov_sum / (cnt*dtim));
+      printf(",%15.8E),", lyapunov_sum / (cnt*dtim));
     else
-      printf(")");
+      printf("),");
     //printf("calculated lyapunov exponent=%15.8E", lyapunov_sum / (dtim * cnt));
     // shift position forward in time by 1/2.
     // to be honest ... final position doesn't matter ... does it?
@@ -557,7 +837,7 @@ int main(int argc, char *argv[]) {
   }
 
   time(&todfin);
-  printf("Total simtime is (s): %13.6E\n", difftime(todfin,todstr2));
+  printf("\nTotal simtime is (s): %13.6E\n", difftime(todfin,todstr2));
 
   /*
   //------------------------
@@ -632,6 +912,10 @@ void InitialSetup() {
 	double zm1, zm2;
 	double bf[3], rp[3];
 
+  // for 2d octupole
+  e_x = cos(phi);
+  e_y = sin(phi);
+
 	//GEOMETRIES of the trap
   radtrp = 0.022275;   // Trap radius
   radtrp2 = radtrp*radtrp;
@@ -700,6 +984,7 @@ void InitialSetup() {
 void GenInitCond(long int& i1, long int& i2, double xv[]) {
   double dum, dum2, theta, vexp, sigma;
 	double Tcut, Tdist;
+  double r, vr;
 
   //Francis initial position generator
 	dum = 0.8e-3*pow(SimRan1(i1,i2),(1./3.)); // 0.0008 * R ^ (1/3) (R between 0 and 1)
@@ -713,7 +998,12 @@ void GenInitCond(long int& i1, long int& i2, double xv[]) {
 
   // Calculation of velocities following Francis's recipe (sent by email):
 	Tdist = 50.0;        // Temperature of the Hbars when they are made (~50 K)
-	Tcut = 0.75;          // Minimum energy at which we know that Hbar cannot be confined in the trap (K)
+  if (useNpr) {
+    Tcut = 15.0; // for NPR code
+  } else {
+    Tcut = 0.75;          // Minimum energy at which we know that Hbar cannot be confined in the trap (K)
+  }
+
   // fine tune Tcut?
 	vexp = sqrt(2.0*kboltz*Tdist/mprot);
   sigma = sqrt(kboltz*Tdist / mprot);
@@ -737,6 +1027,24 @@ void GenInitCond(long int& i1, long int& i2, double xv[]) {
 		xv[5] = dum*cos(theta) ;
 		dum = 0.5*mprot*(xv[3]*xv[3] + xv[4]*xv[4] + xv[5]*xv[5]); // KE of Hbar
 	}
+
+  if (strcmp(potential_option, "oct_2d") == 0) { // make sure that x, y stays on axis
+    r = xv[0]*e_x + xv[1]*e_y;
+    vr = xv[3]*e_x + xv[4]*e_y;
+    xv[0] = r * e_x;
+    xv[1] = r * e_y;
+    xv[3] = vr * e_x;
+    xv[4] = vr*e_y;
+  }
+
+
+  // only x motion allowed
+  /*
+  xv[1] = 0;
+  xv[2] = 0;
+  xv[4] = 0;
+  xv[5] = 0;*/
+
 }
 
 
@@ -762,7 +1070,7 @@ double Energy(double xv[]){
 	bft[0] = 0.0; bft[1] = 0.0; bft[2] = 0.0;
 	Bfield(xv,bft);
 	bmag = sqrt(bft[0]*bft[0]+bft[1]*bft[1]+bft[2]*bft[2]) ;
-	U = magmom0*(bmag-bfmin);  // not a dot product?
+	U = magmom0*npr*(bmag-bfmin);  // not a dot product?
 	return T + U ;
 }
 
@@ -771,23 +1079,34 @@ double Energy(double xv[]){
 //          includes the mirror coils, the uniform field, and the octupole field
 void Bfield(double r[], double bf[]) {
   if (strcmp(potential_option, "ho") == 0) { // Harmonic Oscillator
-    bf[0] = 1.54*(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]) / (radtrp2);
+    bf[0] = 0.803913709*(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]) / (radtrp2);
     bf[1] = 0;
     bf[2] = 0;
   } else {
   	double bf_temp[3] ;
-  	// MIRROR COILS
-    // use this for simplified calculation of solenoid:
-  	Bsolesimp(r,bf_temp);
-    // use this for more accurate calculation of solenoid:
-  	// Bsoles(adi,zpos0,zposf,bcent,r,bfp);
-  	for (int j = 0 ; j < 3 ; j++) {
+
+    if (!(strcmp(potential_option, "oct_edgeless") == 0)) {
+      // MIRROR COILS
+      // use this for simplified calculation of solenoid:
+    	Bsolesimp(r,bf_temp);
+      // use this for more accurate calculation of solenoid:
+    	// Bsoles(adi,zpos0,zposf,bcent,r,bfp);
+    } else {
+      for (int j = 0 ; j < 3 ; j++) {
+        bf_temp[j] = 0;
+      }
+    }
+
+    for (int j = 0 ; j < 3 ; j++) {
       bf[j] = bf_temp[j];
     }
-    if (strcmp(potential_option, "oct") == 0) { // Octupole
+
+    if ((strcmp(potential_option, "oct") == 0) || (strcmp(potential_option, "oct_2d") == 0)) { // Octupole
   	  Boct(r,bf_temp);
     } else if (strcmp(potential_option, "quad") == 0) { // Quadrupole
       Bquad(r, bf_temp);
+    } else if ((strcmp(potential_option, "oct_inf") == 0) || (strcmp(potential_option, "oct_edgeless") == 0)) { // Quadrupole
+      Boct_inf(r, bf_temp);
     }
     for (int j = 0 ; j < 3 ; j++) {
       bf[j] += bf_temp[j];
@@ -977,7 +1296,7 @@ void Bquad(double r[], double bf[]) {
   bf[2] = 0.0 ;
 }
 
-void Boct_edgeless(double r[], double bf[]) {
+void Boct_inf(double r[], double bf[]) {
     bf[0] = r[1]*4*2*imu1*(r[1]*r[1]-3*r[0]*r[0]) ;
     bf[1] =-r[0]*4*2*imu1*(r[0]*r[0]-3*r[1]*r[1]) ;
     bf[2] = 0.0 ;
@@ -987,7 +1306,16 @@ void Boct_edgeless(double r[], double bf[]) {
 
 //--------- Function that calculates the derivative of the 1st order ODE
 void Dydt(double t, double xv[], double dxvdt[]){
-	double frcr, frcz, bf[3], frc[3];
+	double bf[3], frc[3], r, vr, fr;
+
+  if (strcmp(potential_option, "oct_2d") == 0) { // make sure that x, y stays on axis
+    r = xv[0]*e_x + xv[1]*e_y;
+    vr = xv[3]*e_x + xv[4]*e_y;
+    xv[0] = r * e_x;
+    xv[1] = r * e_y;
+    xv[3] = vr * e_x;
+    xv[4] = vr*e_y;
+  }
 
   for (int j = 0 ; j < 3 ; j++) {
 		dxvdt[j] = xv[j+3];
@@ -995,6 +1323,12 @@ void Dydt(double t, double xv[], double dxvdt[]){
 
 	// Calculate magnetic force with updated current, etc.
 	ForceB(xv,frc);
+
+  if (strcmp(potential_option, "oct_2d") == 0) { // make sure that x, y stays on axis
+    fr = frc[0]*e_x + frc[1]*e_y;
+    frc[0] = fr * e_x;
+    frc[1] = fr * e_y;
+  }
 
 	// Put in effect of trapping fields.
   for (int j = 0 ; j < 3 ; j++) {
@@ -1023,7 +1357,11 @@ bool ContinueLoop(double tim, double tfin, double xv[3]) {
   sm_rad = 0.016800;   // Trap radius (small electrode radius) */
 
   if (tim < tfin) {
-    if ((xv[2] > end1) && (xv[2] < end5)) { // within ends of trap
+    if (strcmp(potential_option, "oct_edgeless") == 0) {
+      // printf("%8.15E, ", sqrt(xv[0]*xv[0]+xv[1]*xv[1]));
+      if ((xv[0]*xv[0]+xv[1]*xv[1]) < radtrp2)
+        return true;
+    } else if ((xv[2] > end1) && (xv[2] < end5)) { // within ends of trap
       if ((xv[2] < end2) || (xv[2] > end4)) { // small trap
         if ((xv[0]*xv[0]+xv[1]*xv[1]) < sm_rad2)
           return true;
@@ -1041,7 +1379,16 @@ bool ContinueLoop(double tim, double tfin, double xv[3]) {
 
 // ------- Symplectic Stepper!!
 void Symplec(double tim, double dtim, double xv[]){
-	double dum1, dum2, frcr, frcz, bf[3], vec[3], frc[3];
+	double bf[3], vec[3], frc[3], r, vr, fr;
+
+  if (strcmp(potential_option, "oct_2d") == 0) { // make sure that x, y stays on axis
+    r = xv[0]*e_x + xv[1]*e_y;
+    vr = xv[3]*e_x + xv[4]*e_y;
+    xv[0] = r * e_x;
+    xv[1] = r * e_y;
+    xv[3] = vr * e_x;
+    xv[4] = vr*e_y;
+  }
 
 	// x(t - dt/2) to x(t + dt/2) using v(t)
 	for (int j = 0 ; j < 3 ; j++) {
@@ -1052,6 +1399,13 @@ void Symplec(double tim, double dtim, double xv[]){
 
   // v(t) to v(t + dt) using x(t + dt/2)
 	ForceB(xv,frc);
+
+  if (strcmp(potential_option, "oct_2d") == 0) { // make sure that x, y stayes on
+    double fr = frc[0]*e_x + frc[1]*e_y;
+    frc[0] = fr * e_x;
+    frc[1] = fr * e_y;
+  }
+
   for (int j = 0 ; j < 3 ; j++) {
 		xv[j+3] += dtim*(frc[j] / mprot);
 	}
@@ -1063,7 +1417,7 @@ void ForceB(double xv[], double frc[]) {
 	double dx, bp, bm, rp[3], rm[3], bf[3];
 
 	//dx is needed for numerical derivative of |B| to compute force on Hbar
-	dx = radtrp*1.e-5 ;
+	dx = radtrp * 1.e-8;
 
   for (int i = 0 ; i < 3 ; i++) {
     rp[i] = xv[i];
@@ -1071,14 +1425,15 @@ void ForceB(double xv[], double frc[]) {
   }
 
 	for (int i = 0 ; i < 3 ; i++) {
-		rp[i] += dx/2 ; rm[i] -= dx/2 ;
+		rp[i] += dx/2; rm[i] -= dx/2;
+    volatile double dx_temp = rp[i] - rm[i];
 
 		Bfield(rp,bf);
 		bp = sqrt(Dot(bf, bf));
 		Bfield(rm,bf);
 		bm = sqrt(Dot(bf, bf));
 
-		frc[i] = -magmom0*(bp - bm)/dx;
+		frc[i] = -magmom0*npr*(bp - bm)/dx_temp;
 
 		rp[i] = xv[i]; rm[i] = xv[i];
 	}
@@ -1092,11 +1447,15 @@ std::string DateString() {
 }
 
 // ------- Writes metaparameters –– the parameters shared across all trajectories
-void WriteMetaParams(std::string name, int numtraj, double tfin, double dtim, int seed) {
+void WriteMetaParams(std::string name, int numtraj, double tfin, double dtim, double perturbations[6], int seed) {
   std::ofstream metaparams;
   metaparams.open(("metaparams_" + name + ".csv").c_str(), std::ios_base::app);
-  metaparams << "seed,numtraj,tfin,dtim\n";
-  metaparams << seed << "," << numtraj << "," << tfin << "," << dtim << "\n";
+  metaparams << "seed,numtraj,tfin,dtim,perturbations[0-5]\n";
+  metaparams << seed << "," << numtraj << "," << tfin << "," << dtim << ",";
+  for (int j = 0; j < 6; j++) {
+    metaparams << perturbations[j] << ",";
+  }
+  metaparams << "\n";
   metaparams.close();
 }
 
@@ -1107,7 +1466,7 @@ void WriteCrossings(std::string name, std::vector<double> cross_t, std::vector<d
   crossings << "cross_t,cross_dt,cross_Tz\n";
   crossings << cross_t[0] << "," << 0 << ',' << cross_Tz[0] << "," << 0 << "\n";
   for (int i = 1; i < cross_t.size(); i++) {
-    crossings << cross_t[0] << "," << (cross_t[i] - cross_t[i-1]) << "," << cross_Tz[i] << "\n";
+    crossings << cross_t[i] << "," << (cross_t[i] - cross_t[i-1]) << "," << cross_Tz[i] << "\n";
   }
   crossings.close();
 }
