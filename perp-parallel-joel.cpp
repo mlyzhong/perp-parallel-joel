@@ -9,6 +9,7 @@
 // Mike Zhong
 // 7 June, 2017
 
+// edited!
 
 
 //standard header files
@@ -33,22 +34,25 @@ using Eigen::EigenSolver;
 
 
 
-//---------------------------------- MPI library/instructions for parallelization
-//standard parallelization header files
-// MPI UNCOMMENT
-// #include <mpi.h>
-//----------------------------------
+  //---------------------------------- MPI library/instructions for parallelization
+  //standard parallelization header files
+  // MPI COMMENT
+  /*
+  #include <mpi.h>
+  */
+  // MPI UNCOMMENT
+  //----------------------------------
 
 // parameters ... about using higher magnetic moment
 const int nprst = 25;
 int npr = 1; // the variable of interest!
-bool useNpr = false;
+bool useNpr = true;
 double gamma_decay;
 
 // MAIN PARAMETERS: EDIT HERE
-int numtraj = 1; //number of trajectories to simulate
+int numtraj = 100; //number of trajectories to simulate
 double tfin = 10.0; // final time of each trajectory
-double dtim = 3.5e-6; //dtim is the step size of the symplectic stepper.
+double dtim = 3.5e-5; //dtim is the step size of the symplectic stepper.
                       //3.5e-7 is the usual value for the simulations.
 
 char* potential_option; // "oct", "quad", or "ho"
@@ -88,6 +92,8 @@ double init_pert[6] = {dx0, 0, 0, 0, 0, 0}; // initial perturbation
 // parameter for threshold
 double thresh_frac = 0.2;
 double measure_time = 0.0; // start measurement at this time
+double tim_quasi = 50.0; // quasibound time. ignore if trajectory escapes before then
+
 
 // parameters used in main and in subroutines
 // [SI units + Kelvin wherever specified]
@@ -211,7 +217,7 @@ void WriteMetaParams(std::string name, int numtraj, double tfin, double dtim, do
 void WriteCrossings(std::string name, std::vector<double> cross_t, std::vector<double> cross_Tz);
 
 // computes the average of a file -- returns the average T_z value
-long double average(std::vector<double> cross_Tz);
+long double average(std::vector<double> cross_t, std::vector<double> cross_Tz);
 
 // computes square average, for variance calculation
 long double variance(std::vector<double> cross_Tz, long double average);
@@ -242,20 +248,21 @@ int main(int argc, char *argv[]) {
   time_t todstr, todfin, todstr2;
 	time(&todstr);
 
+
+  //----------------------------------
+  // MPI COMMENT
   /*
-  //----------------------------------
-  // MPI UNCOMMENT
-
-    //initialize mpi variables
-    MPI_Init(&argc, &argv);
-    //find out how many processors
-    MPI_Comm_size(MPI_COMM_WORLD, &nproc);
-    //find out which node
-    MPI_Comm_rank(MPI_COMM_WORLD, &inode);
-    printf("Num. processors: %d, Num. node: %d\n", nproc, inode);
-
-  //----------------------------------
+  //initialize mpi variables
+  MPI_Init(&argc, &argv);
+  //find out how many processors
+  MPI_Comm_size(MPI_COMM_WORLD, &nproc);
+  //find out which node
+  MPI_Comm_rank(MPI_COMM_WORLD, &inode);
+  printf("Num. processors: %d, Num. node: %d\n", nproc, inode);
   */
+  // MPI UNCOMMENT
+  //----------------------------------
+
 
   //seed = atoi(getenv("SEED"));             // Get "seed" from the environment.
 
@@ -288,7 +295,7 @@ int main(int argc, char *argv[]) {
 
     if (strcmp(test_type, "all") == 0) {
       printf("To be printed out: all information (including LLE)\n");
-      printf("t,E,x,y,z,L_1,L_2,L_3,L_4,L_5,L_6");
+      printf("(npr),t,x,y,z,L_1,L_2,L_3,L_4,L_5,L_6");
       // printf("t,E,x,y,z,perp_x,perp_y,perp_z,perp_vx,perp_vy,perp_vz,dlog|perp|/dt");
     } else if (strcmp(test_type, "jacob") == 0) {
       printf("Jacobian test for lyapunov exponent spectrum!\n");
@@ -296,8 +303,12 @@ int main(int argc, char *argv[]) {
       printf("Largest Lyapunov Exponent\n");
     } else if (strcmp(test_type, "cross") == 0) {
       printf("z = 0 Crossings\n");
+    } else if (strcmp(test_type, "cross_francis") == 0) {
+      printf("Francis's Crossing condition\nRecord crossing whenever |B| < 1.01 B_min\n");
     } else if (strcmp(test_type, "thresh") == 0) {
       printf("Threshold Measurements!\n");
+    } else if (strcmp(test_type, "thresh_francis") == 0) {
+      printf("Threshold Measurements! using Francis's crossing condition\n");
     } else {
       printf("That is not a good test type.\n Options are: lle, cross, or thresh");
       return 3;
@@ -311,9 +322,12 @@ int main(int argc, char *argv[]) {
 
   init_name = DateString() + "_" + potential_option + "_" + test_type;
 
+  // MPI COMMENT
+  /*
+  seed += inode;         // Generate different seeds for the parallel processes.
+  //sleep(inode*10);       // Delay to test that the MPI execution is not messed up.
+  */
   // MPI UNCOMMENT
-  // seed += inode;         // Generate different seeds for the parallel processes.
-  // sleep(inode*10);       // Delay to test that the MPI execution is not messed up.
 
   if(seed < 0) seed = (-1)*seed; seed ++;    // Make sure that seed is positive.
 
@@ -345,9 +359,6 @@ int main(int argc, char *argv[]) {
     int cnt = 0;
     int lyapunov_n = 0;
 
-    // initialize the time, starting energy and potentials at the electrodes.
-    tim = -1.0 + 0.1*(2.0*SimRan1(i1,i2) - 1.0);    // start time between -1.1 and -0.9 seconds
-    GenInitCond(i1, i2, xv);		// Generate random initial conditions for this iteration of the loop.
 
     if (useNpr) {
       //nprst is the starting value for n (I usually use ~25)
@@ -358,6 +369,12 @@ int main(int argc, char *argv[]) {
       gamma_decay = 1.61E10 * (2./3.) / (float(npr)*npr*npr*(npr-.5)*(npr-.5)) ;
     }
 
+    // initialize the time, starting energy and potentials at the electrodes.
+    tim = -1.0 + 0.1*(2.0*SimRan1(i1,i2) - 1.0);    // start time between -1.1 and -0.9 seconds
+    GenInitCond(i1, i2, xv);		// Generate random initial conditions for this iteration of the loop.
+
+
+
     // save the initial conditions for output of trajectories that survive.
     for (int j = 0; j < 6; j++) {
       xv0[j] = xv[j];
@@ -365,16 +382,7 @@ int main(int argc, char *argv[]) {
     energy0 = Energy(xv);
     // printf("\nE0=%15.8E ", energy0 / kboltz);
 
-    // shift the position backward in time by 1/2 of time step for Leapfrog integration
 
-    Dydt(tim,xv,dxvdt);
-
-    // taylor expansion, x(t + dt) ~= x(t) + dt*x'(t) + 0.5*(dt)^2*x''(t)
-    double dtim_init = -0.5*dtim;
-    for (int j = 0; j < 3; j++) {
-      xv[j] += dxvdt[j]*dtim_init + 0.5*(dtim_init*dtim_init)*dxvdt[j+3];
-    }
-    // now, x is at tim - dtim/2, v is at tim
 
     // initialize Lyapunov exponent algorithm
     for (int j = 0; j < 6; j++) {
@@ -387,10 +395,12 @@ int main(int argc, char *argv[]) {
       for (int j = 0; j < 3; j++) {
         printf("%15.8E,", xv[j]); // only need to print x, y, z; vx, vy, vz can be determined from data
       }
+      /*
       for (int j = 0; j < 6; j++) {
         printf("%15.8E,", pert[j]); // only need to print x, y, z; vx, vy, vz can be determined from data
       }
       printf("0,"); // start with 0 in d(log pert/dt))
+      */
     }
 
     // initialize z = 0 crossings
@@ -405,36 +415,28 @@ int main(int argc, char *argv[]) {
 
     std::vector<double> cross_t;
     std::vector<double> cross_Tz;
+
+    /*
     std::vector<double> cross_x;
     std::vector<double> cross_y;
     std::vector<double> cross_vx;
     std::vector<double> cross_vy;
+    */
 
 
     double lyapunov_sum = 0;
+    double jacob_sum[6];
 
 
     // threshold parameters
-    double Tz_init;
-    double t_init;
+    double Tz_init, Tz_thresh;
+    double t_init, t_thresh;
     bool started_thresh = false;
     bool finished_thresh = false;
 
     cross_n = 0;
-    while ((ContinueLoop(tim, tfin, xv)) && (!(finished_thresh))) { // finished_thresh only set in threshold test
+    while ((ContinueLoop(tim, tfin, xv)) && (!(finished_thresh && (tim > tim_quasi)))) { // finished_thresh only set in threshold test
       // should step x(t - dt/2) -> x(t + dt/2); v(t) -> v(t+dt);
-
-      if((SimRan1(i1,i2) < (dtim*gamma_decay)) && (npr > 1)) {
-        //nprst is the starting value for n (I usually use ~25)
-        //npr is the initial principle quantum number (set to 1 if want to
-        //   launch the Hbar in its ground state)
-        //gamma_decay is a good approximation to the radiative decay rate
-        npr--;
-        gamma_decay = 1.61E10*(2./3.)/(float(npr)*npr*npr*(npr-.5)*(npr-.5));
-      }
-
-
-
       Symplec(tim, dtim, xv); // time-evolves xv by one step
 
       //increment time and total number of time steps
@@ -442,7 +444,10 @@ int main(int argc, char *argv[]) {
       cnt++;
 
       if (strcmp(test_type, "all") == 0) {
-        printf("\n%15.8E,", tim);
+        printf("\n");
+        if (npr > 1)
+          printf("%d,", npr);
+        printf("%15.8E,", tim);
         //printf("%15.8E ", Energy(xv) / kboltz);
         for (int j = 0; j < 3; j++) {
           printf("%15.8E,", xv[j]); // only need to print x, y, z; vx, vy, vz can be determined from data
@@ -451,7 +456,7 @@ int main(int argc, char *argv[]) {
           // printf("E0=%15.8E ", energy0 / kboltz);
 
 
-      if ((strcmp(test_type, "lle") == 0)) {// Lyapunov Algorithm
+      if ((strcmp(test_type, "lle") == 0))      {// Lyapunov Algorithm
         Symplec(tim, dtim, xv_pert); // time-evolves xv_pert by one step
 
         // computing perturbation size, dx_
@@ -494,7 +499,8 @@ int main(int argc, char *argv[]) {
         printf("lyapunov_sum = %15.8E\n", lyapunov_sum);
         */
 
-      } else if ((strcmp(test_type, "jacob") == 0) || (strcmp(test_type, "all") == 0)) {
+      }
+      else if ((strcmp(test_type, "jacob") == 0) || (strcmp(test_type, "all") == 0)) {
         if ((cnt + 1) % every_n == 0) {
 
           MatrixXd Jac(6,6);
@@ -605,17 +611,16 @@ int main(int argc, char *argv[]) {
             lambdas[j] = log(std::abs(es.eigenvalues()[j])) / (dtim);
           }
 
-          std::sort(std::begin(lambdas), std::end(lambdas));
+          std::sort(lambdas, lambdas + 6);
 
 
-          // printf("\n");
 
           for (int j = 0; j < 6; j++) {
-            printf("%15.8E,", lambdas[5 - j]);
+            jacob_sum[j] += lambdas[5 - j];
+            if (strcmp(test_type, "all") == 0) {
+              printf("%15.8E,", lambdas[5 - j]);
+            }
           }
-
-
-          // printf("\n");
 
           /*
           MatrixXd JacTJac(6,6);
@@ -748,28 +753,88 @@ int main(int argc, char *argv[]) {
           if (strcmp(test_type, "cross") == 0) { // only for cross test
             cross_t.push_back(tim + dtim*s); // more accurate ...
             cross_Tz.push_back(T_z / kboltz);
+
+            /*
             cross_x.push_back(xv_cross[0]);
             cross_y.push_back(xv_cross[1]);
             cross_vx.push_back(xv_cross[3]);
             cross_vy.push_back(xv_cross[4]);
+            */
           }
 
           else if (strcmp(test_type, "thresh") == 0) { // only for threshold test_type
-            if (!(started_thresh) && ((tim + s*dtim) > measure_time)) { // take initial measurement
+            if (!(started_thresh) && ((tim + s*dtim) > measure_time) && (npr = 1)) { // take initial measurement
               started_thresh = true;
               t_init = tim + s*dtim;
               Tz_init = T_z;
-              bool started_thresh = false;
-              bool finished_thresh = false;
             }
-            else if (started_thresh) {
+            else if ((started_thresh) && (!(finished_thresh))) {
               if ((T_z - Tz_init > energy0*thresh_frac) || (T_z - Tz_init < -energy0*thresh_frac)) {
                 finished_thresh = true; // finished sequence
-                printf("\n(t_init,Tz_init,t_fin,Tz_fin)");
+                Tz_thresh = T_z;
+                t_thresh = tim + s*dtim;
+                /*printf("\n(t_init,Tz_init,t_fin,Tz_fin)");
                 printf("\n(%8.8E,", t_init);
-                printf("%8.8E,", Tz_init);
+                printf("%8.8E,", Tz_init / kboltz);
                 printf("%8.8E,", (tim + s*dtim));
-                printf("%8.8E)", T_z);
+                printf("%8.8E)", T_z / kboltz);*/
+              }
+            }
+          }
+
+          // increases number of crosses
+          cross_n++;
+        }
+
+        // updating xprev
+      } else if ((strcmp(test_type, "cross_francis") == 0) || (strcmp(test_type, "thresh_francis") == 0)) {
+        curr_z = xv[2];
+        last_z = xv_prev[2];
+
+        double bft[3], bmag;
+        // potential term
+      	bft[0] = 0.0; bft[1] = 0.0; bft[2] = 0.0;
+      	Bfield(xv,bft);
+      	bmag = sqrt(bft[0]*bft[0]+bft[1]*bft[1]+bft[2]*bft[2]) ;
+
+        if (bmag < 1.01 * bfmin) {
+
+          /* s is linear extr. between (t - dt/2) and (t + dt/2) for z(t + s*dt) = 0
+            s (between -1/2 and 1/2) that satisfies:
+            0 = (1/2 - s)*(last_z) + (s + 1/2)*curr_z = 0.5(last_z + curr_z) - s(last_z - curr_z)
+            => s = 0.5*(curr_z + last_z) / (last_z - curr_z)
+          */
+
+          T_z = 0.5*mprot*(xv[5]*xv[5]);
+
+          if (strcmp(test_type, "cross_francis") == 0) { // only for cross test
+            cross_t.push_back(tim); // more accurate ...
+            cross_Tz.push_back(T_z / kboltz);
+
+            /*
+            cross_x.push_back(xv_cross[0]);
+            cross_y.push_back(xv_cross[1]);
+            cross_vx.push_back(xv_cross[3]);
+            cross_vy.push_back(xv_cross[4]);
+            */
+          }
+
+          else if (strcmp(test_type, "thresh_francis") == 0) { // only for threshold test_type
+            if (!(started_thresh) && ((tim + s*dtim) > measure_time) && (npr = 1)) { // take initial measurement
+              started_thresh = true;
+              t_init = tim + s*dtim;
+              Tz_init = T_z;
+            }
+            else if ((started_thresh) && (!(finished_thresh))) {
+              if ((T_z - Tz_init > energy0*thresh_frac) || (T_z - Tz_init < -energy0*thresh_frac)) {
+                finished_thresh = true; // finished sequence
+                Tz_thresh = T_z;
+                t_thresh = tim + s*dtim;
+                /*printf("\n(t_init,Tz_init,t_fin,Tz_fin)");
+                printf("\n(%8.8E,", t_init);
+                printf("%8.8E,", Tz_init / kboltz);
+                printf("%8.8E,", (tim + s*dtim));
+                printf("%8.8E)", T_z / kboltz);*/
               }
             }
           }
@@ -780,6 +845,7 @@ int main(int argc, char *argv[]) {
 
         // updating xprev
       }
+
       for (int i = 0; i < 6; i++) {
         xv_prev2[i] = xv_prev[i];
         xv_prev[i] = xv[i];
@@ -791,20 +857,39 @@ int main(int argc, char *argv[]) {
     << xv0[0] << "," << xv0[1] << "," << xv0[2] << "," << xv0[3] << "," << xv0[4] << "," << xv0[5] << "\n";
     params.close();
 
-    if ((strcmp(test_type, "thresh") == 0) && (!(finished_thresh))) {
-      printf("\n(t_init,Tz_init,t_fin,Tz_fin)");
-      printf("\n(%8.8E,", t_init);
-      printf("%8.8E,", Tz_init);
-      printf("nan,nan)");
-    }
+
 
     printf("\n(%15.8E,", energy0 / kboltz);
-    printf("%15.8E", tim);
+    printf("%15.8E,", tim);
 
-    if ((strcmp(test_type, "lle") == 0) || (strcmp(test_type, "all") == 0))
-      printf(",%15.8E),", lyapunov_sum / (cnt*dtim));
-    else
-      printf("),");
+    if ((strcmp(test_type, "lle") == 0) || (strcmp(test_type, "all") == 0)) {
+      printf("%15.8E,", lyapunov_sum / (cnt*dtim));
+    }
+
+    if ((strcmp(test_type, "jacob") == 0) || (strcmp(test_type, "all") == 0)) {
+      for (int j = 0; j < 6; j++) {
+        printf("%15.8E,", jacob_sum[j] / cnt);
+      }
+    }
+
+    if ((strcmp(test_type, "cross") == 0) || (strcmp(test_type, "all") == 0) || (strcmp(test_type, "cross_francis") == 0)) {
+      printf("%15.8LE,", average(cross_t, cross_Tz));
+    }
+
+    if ((strcmp(test_type, "thresh") == 0) || (strcmp(test_type, "thresh_francis") == 0)) {
+      if (!(finished_thresh)) {
+        printf("%8.8E,", t_init);
+        printf("%8.8E,", Tz_init / kboltz);
+        printf("nan,nan,");
+      } else {
+        printf("%8.8E,", t_init);
+        printf("%8.8E,", Tz_init / kboltz);
+        printf("%8.8E,", t_thresh);
+        printf("%8.8E,", Tz_thresh / kboltz);
+      }
+    }
+
+    printf("),");
     //printf("calculated lyapunov exponent=%15.8E", lyapunov_sum / (dtim * cnt));
     // shift position forward in time by 1/2.
     // to be honest ... final position doesn't matter ... does it?
@@ -815,11 +900,13 @@ int main(int argc, char *argv[]) {
     } */
 
 
-    if ((strcmp(test_type, "cross") == 0) && (cross_n > 0)) { // as long as there is at least one crossing
+    if (((strcmp(test_type, "cross") == 0) || (strcmp(test_type, "cross_francis") == 0)) && (cross_n > 0)) { // as long as there is at least one crossing
       std::string name;
       std::stringstream name_sstream;
       name_sstream << "seed";
       name_sstream << seed;
+      name_sstream << "_";
+      name_sstream << itraj;
       name_sstream << "_";
       name_sstream << DateString();
       name_sstream >> name;
@@ -839,16 +926,19 @@ int main(int argc, char *argv[]) {
   time(&todfin);
   printf("\nTotal simtime is (s): %13.6E\n", difftime(todfin,todstr2));
 
-  /*
+
   //------------------------
-  // MPI UNCOMMENT
+  // MPI COMMENT
+  /*
    //barrier stops the computation until all nodes reach this point
     MPI_Barrier(MPI_COMM_WORLD) ;
 
     //finalize the mpi variables before the end of the program
     MPI_Finalize();
-  //---------------
   */
+  // MPI UNCOMMENT
+  //---------------
+
   return 1;
 } // END OF MAIN()
 
@@ -985,47 +1075,94 @@ void GenInitCond(long int& i1, long int& i2, double xv[]) {
   double dum, dum2, theta, vexp, sigma;
 	double Tcut, Tdist;
   double r, vr;
+  double dxvdt[6];
+  double init_pos[3];
 
   //Francis initial position generator
-	dum = 0.8e-3*pow(SimRan1(i1,i2),(1./3.)); // 0.0008 * R ^ (1/3) (R between 0 and 1)
-	dum2 = 2.0*SimRan1(i1,i2) - 1.0; // Random between -1 and 1
+  dum = 0.8e-3*pow(SimRan1(i1,i2),(1./3.)); // 0.0008 * R ^ (1/3) (R between 0 and 1)
+  dum2 = 2.0*SimRan1(i1,i2) - 1.0; // Random between -1 and 1
   theta = 2.0*pi*SimRan1(i1,i2); // Random between 0 and 2pi
 
   // CONSTRAINED on ellipse defined by: r^2 + (z/10)^2 = 1, r:=radial, z:=axial
-	xv[0] = dum*sqrt(1.0-dum2*dum2)*cos(theta);
-  xv[1] = dum*sqrt(1.0-dum2*dum2)*sin(theta);
-	xv[2] = zmid + 10.0*dum*dum2;
+  init_pos[0] = dum*sqrt(1.0-dum2*dum2)*cos(theta);
+  init_pos[1] = dum*sqrt(1.0-dum2*dum2)*sin(theta);
+  init_pos[2] = zmid + 10.0*dum*dum2;
 
   // Calculation of velocities following Francis's recipe (sent by email):
 	Tdist = 50.0;        // Temperature of the Hbars when they are made (~50 K)
-  if (useNpr) {
+  /*if (useNpr) {
     Tcut = 15.0; // for NPR code
   } else {
     Tcut = 0.75;          // Minimum energy at which we know that Hbar cannot be confined in the trap (K)
-  }
+  }*/
+  Tcut = 0.75;          // Minimum energy at which we know that Hbar cannot be confined in the trap (K)
 
   // fine tune Tcut?
 	vexp = sqrt(2.0*kboltz*Tdist/mprot);
   sigma = sqrt(kboltz*Tdist / mprot);
 	dum = Tcut+1.0 ;
-	while(dum > kboltz*Tcut) // while K.E. of Hbar is greater than Tcut:
-	{ // see Box-Muller Transformation
+	while((dum > kboltz*Tcut) || (npr > 1)) // while K.E. of Hbar is greater than Tcut:
+	{
+    for (int j = 0; j < 3; j++) {
+      xv[j] = init_pos[j];
+    }
+
+    // see Box-Muller Transformation
     // (http://mathworld.wolfram.com/Box-MullerTransformation.html)
-		theta = 2.0*pi*SimRan1(i1,i2);
 
     // dum = vexp*sqrt(-log(SimRan1(i1,i2))) ;
     // this should give same result: (sigma = vexp/sqrt(2))
     dum = sigma*sqrt(-2.0*log(SimRan1(i1,i2))) ;
-
+    theta = 2.0*pi*SimRan1(i1,i2);
 		xv[3] = dum*cos(theta) ;
     xv[4] = dum*sin(theta) ;
-		theta = 2.0*pi*SimRan1(i1,i2);
 
     // dum = vexp*sqrt(-log(SimRan1(i1,i2))) ;
     dum = sigma*sqrt(-2.0*log(SimRan1(i1,i2))) ;
-
+    theta = 2.0*pi*SimRan1(i1,i2);
 		xv[5] = dum*cos(theta) ;
-		dum = 0.5*mprot*(xv[3]*xv[3] + xv[4]*xv[4] + xv[5]*xv[5]); // KE of Hbar
+
+    // shift the position backward in time by 1/2 of time step for Leapfrog integration
+
+    Dydt(0,xv,dxvdt);
+
+    // taylor expansion, x(t + dt) ~= x(t) + dt*x'(t) + 0.5*(dt)^2*x''(t)
+    double dtim_init = -0.5*dtim;
+    for (int j = 0; j < 3; j++) {
+      xv[j] += dxvdt[j]*dtim_init + 0.5*(dtim_init*dtim_init)*dxvdt[j+3];
+    }
+    // now, x is at tim - dtim/2, v is at tim
+
+
+    // printf("%d,", npr);
+    if (useNpr) {
+      //nprst is the starting value for n (I usually use ~25)
+      //npr is the initial principle quantum number (set to 1 if want to
+      //   launch the Hbar in its ground state)
+      //gamma_decay is a good approximation to the radiative decay rate
+      npr = nprst;
+      gamma_decay = 1.61E10 * (2./3.) / (float(npr)*npr*npr*(npr-.5)*(npr-.5)) ;
+    }
+
+    while ((ContinueLoop(0, tfin, xv)) && (npr > 1)) { // finished_thresh only set in threshold test
+      // should step x(t - dt/2) -> x(t + dt/2); v(t) -> v(t+dt);
+
+      if (SimRan1(i1,i2) < (dtim*gamma_decay)) {
+        //nprst is the starting value for n (I usually use ~25)
+        //npr is the initial principle quantum number (set to 1 if want to
+        //   launch the Hbar in its ground state)
+        //gamma_decay is a good approximation to the radiative decay rate
+        npr--;
+        gamma_decay = 1.61E10*(2./3.)/(float(npr)*npr*npr*(npr-.5)*(npr-.5));
+      }
+      Symplec(0, dtim, xv); // time-evolves xv by one step
+
+    }
+
+    dum = Energy(xv);
+    //printf("%d,", npr);
+    //printf("%8.15E,\n", dum / kboltz);
+		//dum = 0.5*mprot*(xv[3]*xv[3] + xv[4]*xv[4] + xv[5]*xv[5]); // KE of Hbar
 	}
 
   if (strcmp(potential_option, "oct_2d") == 0) { // make sure that x, y stays on axis
@@ -1357,6 +1494,7 @@ bool ContinueLoop(double tim, double tfin, double xv[3]) {
   sm_rad = 0.016800;   // Trap radius (small electrode radius) */
 
   if (tim < tfin) {
+    // printf("%8.15E,\n", (xv[0]*xv[0]+xv[1]*xv[1]));
     if (strcmp(potential_option, "oct_edgeless") == 0) {
       // printf("%8.15E, ", sqrt(xv[0]*xv[0]+xv[1]*xv[1]));
       if ((xv[0]*xv[0]+xv[1]*xv[1]) < radtrp2)
@@ -1471,12 +1609,16 @@ void WriteCrossings(std::string name, std::vector<double> cross_t, std::vector<d
   crossings.close();
 }
 
-long double average(std::vector<double> cross_Tz) {
+long double average(std::vector<double> cross_t, std::vector<double> cross_Tz) {
   long double avg;
-  for (int i = 0; i < cross_Tz.size(); i++) {
-    avg += cross_Tz[i];
+  avg = 0;
+  if (cross_Tz.size() < 2) {
+    return avg;
   }
-  avg /= cross_Tz.size();
+  for (int i = 0; i < (cross_Tz.size() - 1); i++) {
+    avg += 0.5 * (cross_Tz[i + 1] + cross_Tz[i]) * (cross_t[i + 1] - cross_t[i]);
+  }
+  avg /= (cross_t[cross_t.size() - 1] - cross_t[0]);
   return avg;
 }
 
