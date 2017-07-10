@@ -43,6 +43,9 @@ using Eigen::EigenSolver;
   // MPI UNCOMMENT
   //----------------------------------
 
+
+bool useFiveMirrors = true;
+
 // parameters ... about using higher magnetic moment
 const int nprst = 25;
 int npr = 1; // the variable of interest!
@@ -51,9 +54,17 @@ double gamma_decay;
 
 // MAIN PARAMETERS: EDIT HERE
 int numtraj = 100; //number of trajectories to simulate
-double tfin = 10.0; // final time of each trajectory
-double dtim = 3.5e-5; //dtim is the step size of the symplectic stepper.
+// for chaos
+double tfin = 100.0; // final time of each trajectory
+double dtim = 3.5e-6; //dtim is the step size of the symplectic stepper.
                       //3.5e-7 is the usual value for the simulations.
+
+/*
+// normal
+double tfin = 1000.0; // final time of each trajectory
+double dtim = 3.5e-7; //dtim is the step size of the symplectic stepper.
+                      //3.5e-7 is the usual value for the simulations.
+*/
 
 char* potential_option; // "oct", "quad", or "ho"
 char* test_type; // "lle", "thresh", or "crossings"
@@ -110,6 +121,7 @@ const double zsol10 = -14.292e-3, zsol1f = 14.292e-3, lam1 = 0.90190,
              zsol20 = -14.859e-3, zsol2f = 14.859e-3, lam2 = 0.90266,
              radis = 4.5238e-2;
 const double z1 = 0.12946, imu01 = -2.1632e4/1100, dz1 = 16.449e-3;
+const double lam[5] = {0.90190, 0.90190, 0.90190, 0.90190, 0.90190};
 
 // magnetic field things
 double radtrp, radtrp2; // radius of trap
@@ -129,13 +141,17 @@ double bfmin;          // minimum B-field value, to compute energy
 double bfedge;         // B-field at edge of trap
 double bunif;          // uniform B-field
 double bsol1, bsol2;   // B-field from mirror coils on ends
+double bsol[5];
 double co1, co2, co3, co4, co5, co6; // octopole coefficients
 double imu1, ioct;     // more octopole values
 double imu2;           // quadropole values
 
 // coefficients for the mirror field calculation
 double zmirr1, zmirr2; //zmirr1 and zmirr2 are the z-positions of the mirror coils
+double zmirr[5];
 double bcentsol1, bcentsol2, imu0a1, imu0a2, radis2, zpos11, zpos12, zpos21, zpos22;
+double bcentsol[5];
+double zpos1[5], zpos2[5], imu0a[5];
 
 // ---------------------- FUNC DECLARATIONS! ----------------------
 // initializes the random number generator
@@ -275,7 +291,11 @@ int main(int argc, char *argv[]) {
     seed = atoi(argv[3]);
 
     if (strcmp(potential_option, "oct") == 0) {
+      useFiveMirrors = false;
       printf("Normal Octupole\n");
+    } else if (strcmp(potential_option, "oct_flat") == 0) {
+      useFiveMirrors = true;
+      printf("Flattened Octupole\n");
     } else if (strcmp(potential_option, "quad") == 0) {
       printf("Quadrupole\n");
     } else if (strcmp(potential_option, "ho") == 0) {
@@ -336,8 +356,62 @@ int main(int argc, char *argv[]) {
   InitRan(i1,i2);
 
   // Setup the information for the electrodes and the magnetic fields.
+
+
   InitialSetup();
 
+  /*
+  double guess_high = -10;
+  double guess_low = 10;
+  double error = 10.0;
+  double mean = (guess_high + guess_low) / 2;
+
+
+  while (std::abs(error) > 1.0e-10) {
+    mean = (guess_high + guess_low) / 2;
+
+    bsol[0] = 606.0;
+    bsol[1] = -57.8;
+    // sol[2] = -1.7655;
+    bsol[3] = -57.8;
+    bsol[4] = 606.;
+    bsol[2] = mean;
+
+
+    InitialSetup();
+
+
+    // test boct flatness
+
+    double bf[3];
+    double rp[3];
+    double bs[5];
+    double p = 1.0e-6;
+    for (int j = -2; j < 3; j++) {
+      rp[2] = j * p;
+      //printf("%8.15E,", rp[0]);
+      //printf("%8.15E,", rp[1]);
+      //printf("%8.15E,", rp[2]);
+      Bfield(rp,bf);			// The B field is calculated using parameters for t=0.
+    	double bfmag = sqrt(bf[0]*bf[0] + bf[1]*bf[1] + bf[2]*bf[2]);   // <--- "bfedge" is needed in the calculations below
+      bs[j + 2] = bfmag;
+      printf("%8.15E,\n", bfmag);
+    }
+
+    error = (bs[3] + bs[1] - 2*bs[2]) / (p*p);
+    if (error > 0) {
+      guess_high = mean;
+    } else {
+      guess_low = mean;
+    }
+    printf("\n dB/dx = %8.15E,", (bs[3] - bs[1]) / (2*p));
+    printf("\n d2B/dx2 = %8.15E,", (bs[3] + bs[1] - 2*bs[2]) / (p*p));
+    printf("\n");
+    printf("\n");
+    printf("\n");
+  }
+  printf("\n mean = %8.15E",mean);
+  */
 
   // ------------------- START THE SIMULATION!! ------------------------
 
@@ -356,9 +430,8 @@ int main(int argc, char *argv[]) {
   itraj = 0;
 
   while(itraj < numtraj) {  //printf("\nn = %d ", itraj);
-    int cnt = 0;
-    int lyapunov_n = 0;
-
+    long cnt = 0;
+    int bad_jacob = 0;
 
     if (useNpr) {
       //nprst is the starting value for n (I usually use ~25)
@@ -395,6 +468,7 @@ int main(int argc, char *argv[]) {
       for (int j = 0; j < 3; j++) {
         printf("%15.8E,", xv[j]); // only need to print x, y, z; vx, vy, vz can be determined from data
       }
+      printf("Energy = %15.8E,", energy0 / kboltz);
       /*
       for (int j = 0; j < 6; j++) {
         printf("%15.8E,", pert[j]); // only need to print x, y, z; vx, vy, vz can be determined from data
@@ -411,7 +485,7 @@ int main(int argc, char *argv[]) {
     double vz_cross;
     double s;
     double xv_cross[6];
-    int cross_n;
+    long cross_n = 0;
 
     std::vector<double> cross_t;
     std::vector<double> cross_Tz;
@@ -443,10 +517,8 @@ int main(int argc, char *argv[]) {
       tim += dtim;
       cnt++;
 
-      if (strcmp(test_type, "all") == 0) {
+      if (strcmp(test_type, "all") == 0) { // && ((cnt - 1) % int(0.1 / dtim) == 0)) {
         printf("\n");
-        if (npr > 1)
-          printf("%d,", npr);
         printf("%15.8E,", tim);
         //printf("%15.8E ", Energy(xv) / kboltz);
         for (int j = 0; j < 3; j++) {
@@ -456,7 +528,7 @@ int main(int argc, char *argv[]) {
           // printf("E0=%15.8E ", energy0 / kboltz);
 
 
-      if ((strcmp(test_type, "lle") == 0))      {// Lyapunov Algorithm
+      if ((strcmp(test_type, "lle") == 0)) {// Lyapunov Algorithm
         Symplec(tim, dtim, xv_pert); // time-evolves xv_pert by one step
 
         // computing perturbation size, dx_
@@ -503,7 +575,7 @@ int main(int argc, char *argv[]) {
       else if ((strcmp(test_type, "jacob") == 0) || (strcmp(test_type, "all") == 0)) {
         if ((cnt + 1) % every_n == 0) {
 
-          MatrixXd Jac(6,6);
+          Eigen::Matrix<double, 6, 6> Jac;
           //MatrixXd Jac_(6,6);
 
           // matrix test for 2d case
@@ -606,21 +678,27 @@ int main(int argc, char *argv[]) {
 
           double lambdas[6];
 
+          if (es.info() != Eigen::Success) {
+            printf("\nConvergence failure!,\n");
+            bad_jacob++;
+          } else {
+            for (int j = 0; j < 6; j++) {
+              lambdas[j] = log(std::abs(es.eigenvalues()[j])) / (dtim);
+            }
 
-          for (int j = 0; j < 6; j++) {
-            lambdas[j] = log(std::abs(es.eigenvalues()[j])) / (dtim);
-          }
-
-          std::sort(lambdas, lambdas + 6);
+            std::sort(lambdas, lambdas + 6);
 
 
-
-          for (int j = 0; j < 6; j++) {
-            jacob_sum[j] += lambdas[5 - j];
-            if (strcmp(test_type, "all") == 0) {
-              printf("%15.8E,", lambdas[5 - j]);
+            for (int j = 0; j < 6; j++) {
+              jacob_sum[j] += lambdas[5 - j];
+              //if (strcmp(test_type, "all") == 0) {
+                // if (cnt % int(0.1 / dtim) == 0)
+                //  printf("%15.8E,", jacob_sum[j] / cnt); // lambdas[5 - j]);
+              //}
             }
           }
+
+
 
           /*
           MatrixXd JacTJac(6,6);
@@ -787,7 +865,8 @@ int main(int argc, char *argv[]) {
         }
 
         // updating xprev
-      } else if ((strcmp(test_type, "cross_francis") == 0) || (strcmp(test_type, "thresh_francis") == 0)) {
+      }
+      else if ((strcmp(test_type, "cross_francis") == 0) || (strcmp(test_type, "thresh_francis") == 0)) {
         curr_z = xv[2];
         last_z = xv_prev[2];
 
@@ -868,7 +947,7 @@ int main(int argc, char *argv[]) {
 
     if ((strcmp(test_type, "jacob") == 0) || (strcmp(test_type, "all") == 0)) {
       for (int j = 0; j < 6; j++) {
-        printf("%15.8E,", jacob_sum[j] / cnt);
+        printf("%15.8E,", jacob_sum[j] / (cnt - bad_jacob));
       }
     }
 
@@ -1001,6 +1080,7 @@ void InitialSetup() {
 	int j, imid; //i, k;
 	double zm1, zm2;
 	double bf[3], rp[3];
+  double zm[5];
 
   // for 2d octupole
   e_x = cos(phi);
@@ -1028,8 +1108,22 @@ void InitialSetup() {
 	bsol1 = 626.5; //608.0;      // Mirror 1 current (A); produces a maximum on-axis field of 1T. (608.0A in Francis' simulations)
 	bsol2 = 626.5; //608.0;      // Mirror 2 current (A); produces a maximum on-axis field of 1T. (608.0A in Francis' simulations)
 
+  // CURRENTS FOR FLATTENED MIRROR COILS
+  bsol[0] = 606.0;
+  bsol[1] = -5.19071238E+01;
+  bsol[2] = -3.48726244E-01;
+  bsol[3] = -5.19071238E+01;
+  bsol[4] = 606.0;
+
+
   zm1 = -0.13701;     // Position of mirror coil 1 relative to the middle of the trap
 	zm2 = 0.13701;      // Position of mirror coil 2 relative to the middle of the trap
+  zm[0] = zm1;
+  zm[1] = zm1 / 2;
+  zm[2] = 0;
+  zm[3] = zm2 / 2;
+  zm[4] = zm2;
+
 
 	//coefficients for the octupole field calculation
 	imu1 = imu01*ioct;
@@ -1039,6 +1133,16 @@ void InitialSetup() {
 
   //coefficients for the quadrupole field calculation
   imu2 = 1.54 / radtrp;
+
+  // coefficients for 5 mirror field calculation
+  for (int i = 0; i < 5; i++) {
+    zmirr[i] = zmid + zm[i];
+    bcentsol[i] = (1.1987/750)*bsol[i]*sqrt(1.0+0.25*(zsol1f-zsol10)*(zsol1f-zsol10)/(radis*radis));
+    // we will use zsol1f, zsol10 as the universal values
+    imu0a[i]=2.0*radis*bcentsol[i]*0.25*radis*radis;
+    zpos1[i] = zmirr[i] + (zsol10+zsol1f)/2 - sqrt12th*(zsol1f-zsol10);
+    zpos2[i] = zmirr[i] + (zsol10+zsol1f)/2 + sqrt12th*(zsol1f-zsol10);
+  }
 
 	//coefficients for the mirror field calculation
 	zmirr1 = zmid+zm1; zmirr2 = zmid+zm2;    //compute the actual positions of the mirror coils
@@ -1066,6 +1170,10 @@ void InitialSetup() {
 	rp[0] = 0.0; rp[1] = radtrp; rp[2] = zmid;
 	Bfield(rp,bf);			// The B field is calculated using parameters for t=0.
 	bfedge = sqrt(bf[0]*bf[0] + bf[1]*bf[1] + bf[2]*bf[2]);   // <--- "bfedge" is needed in the calculations below
+
+  /* printf("bfmin = %8.15E,\n", bfmin);
+  printf("bfedge = %8.15E,\n", bfedge);
+  printf("bfdiff = %8.15E,\n", bfedge - bfmin);*/
 }
 
 
@@ -1238,7 +1346,7 @@ void Bfield(double r[], double bf[]) {
       bf[j] = bf_temp[j];
     }
 
-    if ((strcmp(potential_option, "oct") == 0) || (strcmp(potential_option, "oct_2d") == 0)) { // Octupole
+    if ((strcmp(potential_option, "oct") == 0) || (strcmp(potential_option, "oct_flat") == 0) || (strcmp(potential_option, "oct_2d") == 0)) { // Octupole
   	  Boct(r,bf_temp);
     } else if (strcmp(potential_option, "quad") == 0) { // Quadrupole
       Bquad(r, bf_temp);
@@ -1263,84 +1371,144 @@ void Bfield(double r[], double bf[]) {
 void Bsolesimp(double r[], double bf[]) {
   double bfp[3], bfold[3], r2a, s2, s, r2b, s2r, r2rs2r, r3a;
 
-  s2 = r[0]*r[0] + r[1]*r[1] ; s = sqrt(s2) ;
+  for(int j = 1 ; j < 3 ; j++) {
+    bf[j] = 0;
+  }
+
+  s2 = r[0]*r[0] + r[1]*r[1] ;
+  s = sqrt(s2) ;
 
   if(s > (1.e-7*radis)) {
-    //compute B from mirr1, loop 1 using ansatz
-    r2a = sqrt(s2 + (r[2]-zpos11)*(r[2]-zpos11) + radis2 - 2*lam1*s*radis) ;
-    r2b = sqrt(s2 + (r[2]-zpos11)*(r[2]-zpos11) + radis2 + 2*lam1*s*radis) ;
-    bfp[1] = imu0a1*(r[2]-zpos11)*(1/(r2a*r2a*r2a) - 1/(r2b*r2b*r2b))/(s*radis*2*lam1) ;
-    bfp[2] = imu0a1*(1/r2a - 1/r2b - s*(s-lam1*radis)/(r2a*r2a*r2a) + s*(s+lam1*radis)/(r2b*r2b*r2b))/(s*radis*2*lam1) ;
 
-    //compute B from mirr1, loop 2 using ansatz
-    r2a = sqrt(s2 + (r[2]-zpos12)*(r[2]-zpos12) + radis2 - 2*lam1*s*radis) ;
-    r2b = sqrt(s2 + (r[2]-zpos12)*(r[2]-zpos12) + radis2 + 2*lam1*s*radis) ;
-    bfold[1] = imu0a1*(r[2]-zpos12)*(1/(r2a*r2a*r2a) - 1/(r2b*r2b*r2b))/(s*radis*2*lam1) ;
-    bfold[2] = imu0a1*(1/r2a - 1/r2b - s*(s-lam1*radis)/(r2a*r2a*r2a) + s*(s+lam1*radis)/(r2b*r2b*r2b))/(s*radis*2*lam1) ;
+    if (useFiveMirrors) {
+      for (int i = 0; i < 5; i++) {
+        // computer B from mirror j, loop j using ansaz
 
-    //compute the B for the solenoid 1
-    for(int j = 1 ; j < 3 ; j++) {
-      bf[j] = 0.5*(bfold[j]+bfp[j]);
+        // computer B from mirror j, loop 1 using ansaz
+        r2a = sqrt(s2 + (r[2]-zpos1[i])*(r[2]-zpos1[i]) + radis2 - 2*lam[i]*s*radis) ;
+        r2b = sqrt(s2 + (r[2]-zpos1[i])*(r[2]-zpos1[i]) + radis2 + 2*lam[i]*s*radis) ;
+        bfp[1] = imu0a[i]*(r[2]-zpos1[i])*(1/(r2a*r2a*r2a) - 1/(r2b*r2b*r2b))/(s*radis*2*lam[i]) ;
+        bfp[2] = imu0a[i]*(1/r2a - 1/r2b - s*(s-lam[i]*radis)/(r2a*r2a*r2a) + s*(s+lam[i]*radis)/(r2b*r2b*r2b))/(s*radis*2*lam[i]) ;
+
+        // computer B from mirror j, loop 2 using ansaz
+        r2a = sqrt(s2 + (r[2]-zpos2[i])*(r[2]-zpos2[i]) + radis2 - 2*lam[i]*s*radis) ;
+        r2b = sqrt(s2 + (r[2]-zpos2[i])*(r[2]-zpos2[i]) + radis2 + 2*lam[i]*s*radis) ;
+        bfold[1] = imu0a[i]*(r[2]-zpos2[i])*(1/(r2a*r2a*r2a) - 1/(r2b*r2b*r2b))/(s*radis*2*lam[i]) ;
+        bfold[2] = imu0a[i]*(1/r2a - 1/r2b - s*(s-lam[i]*radis)/(r2a*r2a*r2a) + s*(s+lam[i]*radis)/(r2b*r2b*r2b))/(s*radis*2*lam[i]) ;
+
+        //compute the B for the solenoid 2
+        for(int j = 1 ; j < 3 ; j++) {
+          bf[j] += 0.5*(bfold[j]+bfp[j]);
+        }
+      }
     }
 
-    //compute B from mirr2, loop 1 using ansatz
-    r2a = sqrt(s2 + (r[2]-zpos21)*(r[2]-zpos21) + radis2 - 2*lam2*s*radis) ;
-    r2b = sqrt(s2 + (r[2]-zpos21)*(r[2]-zpos21) + radis2 + 2*lam2*s*radis) ;
-    bfp[1] = imu0a2*(r[2]-zpos21)*(1/(r2a*r2a*r2a) - 1/(r2b*r2b*r2b))/(s*radis*2*lam2) ;
-    bfp[2] = imu0a2*(1/r2a - 1/r2b - s*(s-lam2*radis)/(r2a*r2a*r2a) + s*(s+lam2*radis)/(r2b*r2b*r2b))/(s*radis*2*lam2) ;
+    else
+    {
 
-    //compute B from mirr2, loop 2 using ansatz
-    r2a = sqrt(s2 + (r[2]-zpos22)*(r[2]-zpos22) + radis2 - 2*lam2*s*radis) ;
-    r2b = sqrt(s2 + (r[2]-zpos22)*(r[2]-zpos22) + radis2 + 2*lam2*s*radis) ;
-    bfold[1] = imu0a2*(r[2]-zpos22)*(1/(r2a*r2a*r2a) - 1/(r2b*r2b*r2b))/(s*radis*2*lam2) ;
-    bfold[2] = imu0a2*(1/r2a - 1/r2b - s*(s-lam2*radis)/(r2a*r2a*r2a) + s*(s+lam2*radis)/(r2b*r2b*r2b))/(s*radis*2*lam2) ;
+      //compute B from mirr1, loop 1 using ansatz
+      r2a = sqrt(s2 + (r[2]-zpos11)*(r[2]-zpos11) + radis2 - 2*lam1*s*radis) ;
+      r2b = sqrt(s2 + (r[2]-zpos11)*(r[2]-zpos11) + radis2 + 2*lam1*s*radis) ;
+      bfp[1] = imu0a1*(r[2]-zpos11)*(1/(r2a*r2a*r2a) - 1/(r2b*r2b*r2b))/(s*radis*2*lam1) ;
+      bfp[2] = imu0a1*(1/r2a - 1/r2b - s*(s-lam1*radis)/(r2a*r2a*r2a) + s*(s+lam1*radis)/(r2b*r2b*r2b))/(s*radis*2*lam1) ;
 
-    //compute the B for the solenoid 2
-    for(int j = 1 ; j < 3 ; j++) {
-      bf[j] += 0.5*(bfold[j]+bfp[j]);
+      //compute B from mirr1, loop 2 using ansatz
+      r2a = sqrt(s2 + (r[2]-zpos12)*(r[2]-zpos12) + radis2 - 2*lam1*s*radis) ;
+      r2b = sqrt(s2 + (r[2]-zpos12)*(r[2]-zpos12) + radis2 + 2*lam1*s*radis) ;
+      bfold[1] = imu0a1*(r[2]-zpos12)*(1/(r2a*r2a*r2a) - 1/(r2b*r2b*r2b))/(s*radis*2*lam1) ;
+      bfold[2] = imu0a1*(1/r2a - 1/r2b - s*(s-lam1*radis)/(r2a*r2a*r2a) + s*(s+lam1*radis)/(r2b*r2b*r2b))/(s*radis*2*lam1) ;
+
+      //compute the B for the solenoid 1
+      for(int j = 1 ; j < 3 ; j++) {
+        bf[j] = 0.5*(bfold[j]+bfp[j]);
+      }
+
+      //compute B from mirr2, loop 1 using ansatz
+      r2a = sqrt(s2 + (r[2]-zpos21)*(r[2]-zpos21) + radis2 - 2*lam2*s*radis) ;
+      r2b = sqrt(s2 + (r[2]-zpos21)*(r[2]-zpos21) + radis2 + 2*lam2*s*radis) ;
+      bfp[1] = imu0a2*(r[2]-zpos21)*(1/(r2a*r2a*r2a) - 1/(r2b*r2b*r2b))/(s*radis*2*lam2) ;
+      bfp[2] = imu0a2*(1/r2a - 1/r2b - s*(s-lam2*radis)/(r2a*r2a*r2a) + s*(s+lam2*radis)/(r2b*r2b*r2b))/(s*radis*2*lam2) ;
+
+      //compute B from mirr2, loop 2 using ansatz
+      r2a = sqrt(s2 + (r[2]-zpos22)*(r[2]-zpos22) + radis2 - 2*lam2*s*radis) ;
+      r2b = sqrt(s2 + (r[2]-zpos22)*(r[2]-zpos22) + radis2 + 2*lam2*s*radis) ;
+      bfold[1] = imu0a2*(r[2]-zpos22)*(1/(r2a*r2a*r2a) - 1/(r2b*r2b*r2b))/(s*radis*2*lam2) ;
+      bfold[2] = imu0a2*(1/r2a - 1/r2b - s*(s-lam2*radis)/(r2a*r2a*r2a) + s*(s+lam2*radis)/(r2b*r2b*r2b))/(s*radis*2*lam2) ;
+
+      //compute the B for the solenoid 2
+      for(int j = 1 ; j < 3 ; j++) {
+        bf[j] += 0.5*(bfold[j]+bfp[j]);
+      }
     }
 
     //convert B_s/s to B_x and B_y
     bf[0] = bf[1]*r[0] ; bf[1] *= r[1] ;
   } else {
-    //compute B from mirr1, loop 1 using ansatz
-    r2a = 1/(s2 + (r[2]-zpos11)*(r[2]-zpos11) + radis2) ;
-    s2r = s2*r2a ; r2rs2r = radis2*r2a*s2r ;
-    r3a = imu0a1*r2a*sqrt(r2a) ;
-    bfp[1] = (r[2]-zpos11)*(3+17.5*lam1*lam1*r2rs2r)*r2a*r3a ;
-    bfp[2] = (2-3*s2r+10*lam1*lam1*r2rs2r*(1-1.75*s2r))*r3a ;
 
+    if (useFiveMirrors) {
+      for (int i = 0; i < 5; i++) {
+        // computer B from mirror j, loop j using ansaz
 
-    //compute B from mirr1, loop 2 using ansatz
-    r2a = 1/(s2 + (r[2]-zpos12)*(r[2]-zpos12) + radis2) ;
-    s2r = s2*r2a ; r2rs2r = radis2*r2a*s2r ;
-    r3a = imu0a1*r2a*sqrt(r2a) ;
-    bfold[1] = (r[2]-zpos12)*(3+17.5*lam1*lam1*r2rs2r)*r2a*r3a ;
-    bfold[2] = (2-3*s2r+10*lam1*lam1*r2rs2r*(1-1.75*s2r))*r3a ;
+        //compute B from mirr2, loop 1 using ansatz
+        r2a = 1/(s2 + (r[2]-zpos1[i])*(r[2]-zpos1[i]) + radis2) ;
+        s2r = s2*r2a ; r2rs2r = radis2*r2a*s2r ;
+        r3a = imu0a[i]*r2a*sqrt(r2a) ;
+        bfp[1] = (r[2]-zpos2[i])*(3+17.5*lam[i]*lam[i]*r2rs2r)*r2a*r3a ;
+        bfp[2] = (2-3*s2r+10*lam[i]*lam[i]*r2rs2r*(1-1.75*s2r))*r3a ;
 
-    //compute the B for the solenoid 1
-    for (int j = 1 ; j < 3 ; j++) {
-      bf[j] = 0.5*(bfold[j]+bfp[j]);
+        //compute B from mirr2, loop 2 using ansatz
+        r2a = 1/(s2 + (r[2]-zpos2[i])*(r[2]-zpos2[i]) + radis2) ;
+        s2r = s2*r2a ; r2rs2r = radis2*r2a*s2r ;
+        r3a = imu0a[i]*r2a*sqrt(r2a) ;
+        bfold[1] = (r[2]-zpos2[i])*(3+17.5*lam[i]*lam[i]*r2rs2r)*r2a*r3a ;
+        bfold[2] = (2-3*s2r+10*lam[i]*lam[i]*r2rs2r*(1-1.75*s2r))*r3a ;
+
+        //compute the B for the solenoid 2
+        for(int j = 1 ; j < 3 ; j++) {
+          bf[j] += 0.5*(bfold[j]+bfp[j]);
+        }
+      }
     }
 
+    else {
+      //compute B from mirr1, loop 1 using ansatz
+      r2a = 1/(s2 + (r[2]-zpos11)*(r[2]-zpos11) + radis2) ;
+      s2r = s2*r2a ; r2rs2r = radis2*r2a*s2r ;
+      r3a = imu0a1*r2a*sqrt(r2a) ;
+      bfp[1] = (r[2]-zpos11)*(3+17.5*lam1*lam1*r2rs2r)*r2a*r3a ;
+      bfp[2] = (2-3*s2r+10*lam1*lam1*r2rs2r*(1-1.75*s2r))*r3a ;
 
-    //compute B from mirr2, loop 1 using ansatz
-    r2a = 1/(s2 + (r[2]-zpos21)*(r[2]-zpos21) + radis2) ;
-    s2r = s2*r2a ; r2rs2r = radis2*r2a*s2r ;
-    r3a = imu0a2*r2a*sqrt(r2a) ;
-    bfp[1] = (r[2]-zpos21)*(3+17.5*lam1*lam1*r2rs2r)*r2a*r3a ;
-    bfp[2] = (2-3*s2r+10*lam1*lam1*r2rs2r*(1-1.75*s2r))*r3a ;
+      //compute B from mirr1, loop 2 using ansatz
+      r2a = 1/(s2 + (r[2]-zpos12)*(r[2]-zpos12) + radis2) ;
+      s2r = s2*r2a ; r2rs2r = radis2*r2a*s2r ;
+      r3a = imu0a1*r2a*sqrt(r2a) ;
+      bfold[1] = (r[2]-zpos12)*(3+17.5*lam1*lam1*r2rs2r)*r2a*r3a ;
+      bfold[2] = (2-3*s2r+10*lam1*lam1*r2rs2r*(1-1.75*s2r))*r3a ;
 
-    //compute B from mirr2, loop 2 using ansatz
-    r2a = 1/(s2 + (r[2]-zpos22)*(r[2]-zpos22) + radis2) ;
-    s2r = s2*r2a ; r2rs2r = radis2*r2a*s2r ;
-    r3a = imu0a2*r2a*sqrt(r2a) ;
-    bfold[1] = (r[2]-zpos22)*(3+17.5*lam1*lam1*r2rs2r)*r2a*r3a ;
-    bfold[2] = (2-3*s2r+10*lam1*lam1*r2rs2r*(1-1.75*s2r))*r3a ;
+      //compute the B for the solenoid 1
+      for (int j = 1 ; j < 3 ; j++) {
+        bf[j] = 0.5*(bfold[j]+bfp[j]);
+      }
 
-    //compute the B for the solenoid 2
-    for(int j = 1 ; j < 3 ; j++) {
-      bf[j] += 0.5*(bfold[j]+bfp[j]);
+
+      //compute B from mirr2, loop 1 using ansatz
+      r2a = 1/(s2 + (r[2]-zpos21)*(r[2]-zpos21) + radis2) ;
+      s2r = s2*r2a ; r2rs2r = radis2*r2a*s2r ;
+      r3a = imu0a2*r2a*sqrt(r2a) ;
+      bfp[1] = (r[2]-zpos21)*(3+17.5*lam1*lam1*r2rs2r)*r2a*r3a ;
+      bfp[2] = (2-3*s2r+10*lam1*lam1*r2rs2r*(1-1.75*s2r))*r3a ;
+
+      //compute B from mirr2, loop 2 using ansatz
+      r2a = 1/(s2 + (r[2]-zpos22)*(r[2]-zpos22) + radis2) ;
+      s2r = s2*r2a ; r2rs2r = radis2*r2a*s2r ;
+      r3a = imu0a2*r2a*sqrt(r2a) ;
+      bfold[1] = (r[2]-zpos22)*(3+17.5*lam1*lam1*r2rs2r)*r2a*r3a ;
+      bfold[2] = (2-3*s2r+10*lam1*lam1*r2rs2r*(1-1.75*s2r))*r3a ;
+
+      //compute the B for the solenoid 2
+      for(int j = 1 ; j < 3 ; j++) {
+        bf[j] += 0.5*(bfold[j]+bfp[j]);
+      }
     }
 
     //convert B_s/s to B_x and B_y
